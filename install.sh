@@ -363,7 +363,7 @@ echo "Using CODEX_CLI_PATH=$CODEX_CLI_PATH"
 
 cd "$SCRIPT_DIR"
 echo "$$" > "$APP_PID_FILE"
-exec "$SCRIPT_DIR/electron" --no-sandbox --class=codex-desktop "$@"
+exec "$SCRIPT_DIR/electron" --no-sandbox --class=codex-desktop --app-id=codex-desktop "$@"
 SCRIPT
 
     chmod +x "$INSTALL_DIR/start.sh"

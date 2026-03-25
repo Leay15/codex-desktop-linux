@@ -15,7 +15,7 @@ use tracing::info;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildArtifacts {
     pub workspace_dir: PathBuf,
-    pub deb_path: PathBuf,
+    pub package_path: PathBuf,
 }
 
 pub async fn build_update(
@@ -95,7 +95,7 @@ pub async fn build_update(
 
     Ok(BuildArtifacts {
         workspace_dir,
-        deb_path: package_path,
+        package_path,
     })
 }
 
@@ -368,10 +368,10 @@ chmod +x "${CODEX_INSTALL_DIR}/start.sh"
             build_update(&config, &mut state, &paths, "2026.03.24+abcd1234", &dmg_path).await?;
         assert_eq!(state.status, UpdateStatus::ReadyToInstall);
         assert!(artifacts.workspace_dir.exists());
-        assert!(artifacts.deb_path.exists());
+        assert!(artifacts.package_path.exists());
         // The file should be either a .deb or .rpm depending on the host distro.
         let ext = artifacts
-            .deb_path
+            .package_path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("");
