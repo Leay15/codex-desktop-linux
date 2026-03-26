@@ -1,3 +1,5 @@
 *.dmg
 node_modules/
 codex-app/
+target/
+dist/

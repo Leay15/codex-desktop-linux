@@ -35,10 +35,15 @@ check_deps() {
     done
     if [ ${#missing[@]} -ne 0 ]; then
         error "Missing dependencies: ${missing[*]}
-Install them first:
-  sudo apt install nodejs npm python3 p7zip-full curl unzip build-essential  # Debian/Ubuntu
-  sudo dnf install nodejs npm python3 p7zip curl unzip && sudo dnf groupinstall 'Development Tools'  # Fedora
-  sudo pacman -S nodejs npm python p7zip curl unzip base-devel  # Arch"
+Run the helper to install them automatically:
+  bash scripts/install-deps.sh
+
+Or install manually:
+  sudo apt install nodejs npm python3 p7zip-full curl unzip build-essential         # Debian/Ubuntu
+  sudo dnf install nodejs npm python3 7zip curl unzip @development-tools            # Fedora 41+ (dnf5)
+  sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip                # Fedora <41 (dnf)
+    && sudo dnf groupinstall 'Development Tools'
+  sudo pacman -S nodejs npm python p7zip curl unzip base-devel                      # Arch"
     fi
 
     NODE_MAJOR=$(node -v | cut -d. -f1 | tr -d v)
@@ -48,9 +53,11 @@ Install them first:
 
     if ! command -v make &>/dev/null || ! command -v g++ &>/dev/null; then
         error "Build tools (make, g++) required:
-  sudo apt install build-essential   # Debian/Ubuntu
-  sudo dnf groupinstall 'Development Tools'  # Fedora
-  sudo pacman -S base-devel          # Arch"
+  bash scripts/install-deps.sh                                          # auto-detect
+  sudo apt install build-essential                                       # Debian/Ubuntu
+  sudo dnf install @development-tools                                    # Fedora 41+ (dnf5)
+  sudo dnf groupinstall 'Development Tools'                              # Fedora <41 (dnf)
+  sudo pacman -S base-devel                                              # Arch"
     fi
 
     info "All dependencies found"
@@ -238,8 +245,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WEBVIEW_DIR="$SCRIPT_DIR/content/webview"
 LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/codex-desktop"
 LOG_FILE="$LOG_DIR/launcher.log"
+APP_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codex-desktop"
+APP_PID_FILE="$APP_STATE_DIR/app.pid"
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$APP_STATE_DIR"
 exec >>"$LOG_FILE" 2>&1
 
 echo "[$(date -Is)] Starting Codex Desktop launcher"
@@ -285,6 +294,58 @@ notify_error() {
     fi
 }
 
+clear_stale_pid_file() {
+    if [ ! -f "$APP_PID_FILE" ]; then
+        return 0
+    fi
+
+    local pid=""
+    pid="$(cat "$APP_PID_FILE" 2>/dev/null || true)"
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        rm -f "$APP_PID_FILE"
+    fi
+}
+
+ensure_update_manager_service() {
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "$XDG_RUNTIME_DIR" ]; then
+        return 0
+    fi
+
+    if ! systemctl --user show-environment >/dev/null 2>&1; then
+        return 0
+    fi
+
+    systemctl --user import-environment \
+        PATH \
+        DISPLAY \
+        WAYLAND_DISPLAY \
+        DBUS_SESSION_BUS_ADDRESS \
+        XAUTHORITY \
+        XDG_RUNTIME_DIR >/dev/null 2>&1 || true
+
+    if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+        dbus-update-activation-environment --systemd \
+            PATH \
+            DISPLAY \
+            WAYLAND_DISPLAY \
+            DBUS_SESSION_BUS_ADDRESS \
+            XAUTHORITY \
+            XDG_RUNTIME_DIR >/dev/null 2>&1 || true
+    fi
+
+    if systemctl --user is-enabled codex-update-manager.service >/dev/null 2>&1; then
+        systemctl --user start codex-update-manager.service >/dev/null 2>&1 || true
+    else
+        systemctl --user enable --now codex-update-manager.service >/dev/null 2>&1 || true
+    fi
+}
+
+clear_stale_pid_file
+ensure_update_manager_service
 pkill -f "http.server 5175" 2>/dev/null || true
 sleep 0.3
 
@@ -308,7 +369,8 @@ fi
 echo "Using CODEX_CLI_PATH=$CODEX_CLI_PATH"
 
 cd "$SCRIPT_DIR"
-exec "$SCRIPT_DIR/electron" --no-sandbox --class=codex-desktop "$@"
+echo "$$" > "$APP_PID_FILE"
+exec "$SCRIPT_DIR/electron" --no-sandbox --class=codex-desktop --app-id=codex-desktop "$@"
 SCRIPT
 
     chmod +x "$INSTALL_DIR/start.sh"

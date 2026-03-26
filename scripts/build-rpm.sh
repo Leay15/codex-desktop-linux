@@ -1,0 +1,156 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+APP_DIR="${APP_DIR_OVERRIDE:-$REPO_DIR/codex-app}"
+DIST_DIR="${DIST_DIR_OVERRIDE:-$REPO_DIR/dist}"
+SPEC_TEMPLATE="$REPO_DIR/packaging/linux/codex-desktop.spec"
+DESKTOP_TEMPLATE="$REPO_DIR/packaging/linux/codex-desktop.desktop"
+SERVICE_TEMPLATE="$REPO_DIR/packaging/linux/codex-update-manager.service"
+ICON_SOURCE="$REPO_DIR/assets/codex.png"
+
+PACKAGE_NAME="${PACKAGE_NAME:-codex-desktop}"
+PACKAGE_VERSION="${PACKAGE_VERSION:-$(date -u +%Y.%m.%d.%H%M%S)}"
+UPDATER_BINARY_SOURCE="${UPDATER_BINARY_SOURCE:-$REPO_DIR/target/release/codex-update-manager}"
+UPDATER_SERVICE_SOURCE="${UPDATER_SERVICE_SOURCE:-$SERVICE_TEMPLATE}"
+UPDATE_BUILDER_ROOT_PLACEHOLDER="__UPDATE_BUILDER_ROOT__"
+
+info()  { echo "[INFO] $*" >&2; }
+error() { echo "[ERROR] $*" >&2; exit 1; }
+
+map_arch() {
+    case "$(uname -m)" in
+        x86_64)  echo "x86_64" ;;
+        aarch64) echo "aarch64" ;;
+        armv7l)  echo "armv7hl" ;;
+        *)       error "Unsupported architecture: $(uname -m)" ;;
+    esac
+}
+
+# RPM version must not contain '+'; split PACKAGE_VERSION on '+' into version and release
+rpm_version_parts() {
+    local base
+    base="${PACKAGE_VERSION%%+*}"
+    local hash
+    hash="${PACKAGE_VERSION#*+}"
+    if [ "$base" = "$PACKAGE_VERSION" ]; then
+        hash="1"
+    fi
+    RPM_VERSION="$base"
+    RPM_RELEASE="$hash"
+}
+
+ensure_updater_binary() {
+    if [ -x "$UPDATER_BINARY_SOURCE" ]; then
+        return
+    fi
+
+    [ -f "$REPO_DIR/Cargo.toml" ] || error "Missing updater binary: $UPDATER_BINARY_SOURCE"
+    command -v cargo >/dev/null 2>&1 || error "cargo is required to build codex-update-manager.
+Install the Rust toolchain:
+  bash scripts/install-deps.sh        # auto-installs via rustup
+  # or manually: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+
+    info "Building codex-update-manager release binary"
+    cargo build --release -p codex-update-manager >&2
+    [ -x "$UPDATER_BINARY_SOURCE" ] || error "Failed to build updater binary: $UPDATER_BINARY_SOURCE"
+}
+
+main() {
+    [ -d "$APP_DIR" ] || error "Missing app directory: $APP_DIR. Run ./install.sh first."
+    [ -x "$APP_DIR/start.sh" ] || error "Missing launcher: $APP_DIR/start.sh"
+    [ -f "$SPEC_TEMPLATE" ] || error "Missing spec template: $SPEC_TEMPLATE"
+    [ -f "$DESKTOP_TEMPLATE" ] || error "Missing desktop template: $DESKTOP_TEMPLATE"
+    [ -f "$UPDATER_SERVICE_SOURCE" ] || error "Missing updater service template: $UPDATER_SERVICE_SOURCE"
+    [ -f "$ICON_SOURCE" ] || error "Missing icon: $ICON_SOURCE"
+    command -v rpmbuild >/dev/null 2>&1 || error "rpmbuild is required (install rpm-build)"
+
+    ensure_updater_binary
+
+    local arch
+    arch="$(map_arch)"
+    rpm_version_parts
+    local rpm_ver="$RPM_VERSION"
+    local rpm_rel="$RPM_RELEASE"
+
+    local build_root
+    build_root="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$build_root'" EXIT
+
+    local br="$build_root/BUILDROOT"
+    local update_builder_dir="$br/opt/$PACKAGE_NAME/update-builder"
+
+    mkdir -p \
+        "$br/opt/$PACKAGE_NAME" \
+        "$br/usr/bin" \
+        "$br/usr/lib/systemd/user" \
+        "$br/usr/share/applications" \
+        "$br/usr/share/icons/hicolor/256x256/apps"
+
+    cp -a "$APP_DIR/." "$br/opt/$PACKAGE_NAME/"
+    cp "$DESKTOP_TEMPLATE" "$br/usr/share/applications/$PACKAGE_NAME.desktop"
+    cp "$ICON_SOURCE" "$br/usr/share/icons/hicolor/256x256/apps/$PACKAGE_NAME.png"
+    cp "$UPDATER_BINARY_SOURCE" "$br/usr/bin/codex-update-manager"
+    chmod 0755 "$br/usr/bin/codex-update-manager"
+    cp "$UPDATER_SERVICE_SOURCE" "$br/usr/lib/systemd/user/codex-update-manager.service"
+    chmod 0644 "$br/usr/lib/systemd/user/codex-update-manager.service"
+
+    mkdir -p \
+        "$update_builder_dir/scripts" \
+        "$update_builder_dir/packaging/linux" \
+        "$update_builder_dir/assets"
+    cp "$REPO_DIR/install.sh" "$update_builder_dir/install.sh"
+    cp "$REPO_DIR/scripts/build-rpm.sh" "$update_builder_dir/scripts/build-rpm.sh"
+    cp "$REPO_DIR/scripts/build-deb.sh" "$update_builder_dir/scripts/build-deb.sh"
+    cp "$REPO_DIR/packaging/linux/codex-desktop.spec" "$update_builder_dir/packaging/linux/codex-desktop.spec"
+    cp "$REPO_DIR/packaging/linux/control" "$update_builder_dir/packaging/linux/control"
+    cp "$REPO_DIR/packaging/linux/codex-desktop.desktop" "$update_builder_dir/packaging/linux/codex-desktop.desktop"
+    cp "$UPDATER_SERVICE_SOURCE" "$update_builder_dir/packaging/linux/codex-update-manager.service"
+    cp "$REPO_DIR/assets/codex.png" "$update_builder_dir/assets/codex.png"
+
+    cat > "$br/usr/bin/$PACKAGE_NAME" <<SCRIPT
+#!/bin/bash
+exec /opt/$PACKAGE_NAME/start.sh "\$@"
+SCRIPT
+    chmod 0755 "$br/usr/bin/$PACKAGE_NAME"
+
+    local spec_file="$build_root/codex-desktop.spec"
+    sed \
+        -e "s/__PACKAGE_NAME__/$PACKAGE_NAME/g" \
+        -e "s/__RPM_VERSION__/$rpm_ver/g" \
+        -e "s/__RPM_RELEASE__/$rpm_rel/g" \
+        -e "s/__ARCH__/$arch/g" \
+        "$SPEC_TEMPLATE" > "$spec_file"
+
+    local rpmbuild_dir="$build_root/rpmbuild"
+    mkdir -p \
+        "$rpmbuild_dir/RPMS" \
+        "$rpmbuild_dir/SRPMS" \
+        "$rpmbuild_dir/BUILD" \
+        "$rpmbuild_dir/SOURCES" \
+        "$rpmbuild_dir/SPECS"
+
+    mkdir -p "$DIST_DIR"
+    info "Building $PACKAGE_NAME-${rpm_ver}-${rpm_rel}.${arch}.rpm"
+    rpmbuild -bb \
+        --buildroot "$br" \
+        --define "_rpmdir $rpmbuild_dir/RPMS" \
+        --define "_srcrpmdir $rpmbuild_dir/SRPMS" \
+        --define "_builddir $rpmbuild_dir/BUILD" \
+        --define "_sourcedir $rpmbuild_dir/SOURCES" \
+        --define "_specdir $build_root" \
+        --define "_build_name_fmt %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm" \
+        "$spec_file" >&2
+
+    local rpm_file
+    rpm_file="$(find "$rpmbuild_dir/RPMS" -name "*.rpm" | head -n 1)"
+    [ -f "$rpm_file" ] || error "rpmbuild did not produce an RPM"
+
+    local output_file="$DIST_DIR/${PACKAGE_NAME}-${rpm_ver}-${rpm_rel}.${arch}.rpm"
+    cp "$rpm_file" "$output_file"
+    info "Built package: $output_file"
+}
+
+main "$@"

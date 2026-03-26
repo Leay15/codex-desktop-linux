@@ -17,25 +17,49 @@ The installer:
 
 ## Prerequisites
 
-**Node.js 20+**, **npm**, **Python 3**, **7z**, **curl**, and **build tools** (gcc/g++/make).
+**Node.js 20+**, **npm**, **Python 3**, **7z**, **curl**, **build tools** (gcc/g++/make), and **Rust** (cargo — needed to compile the update manager).
+
+Run the helper script to install everything automatically (detects apt / dnf5 / dnf / pacman and installs Rust via rustup):
+
+```bash
+bash scripts/install-deps.sh
+```
+
+Or install manually for your distro:
 
 ### Debian/Ubuntu
 
 ```bash
-sudo apt install nodejs npm python3 p7zip-full curl build-essential
+sudo apt install nodejs npm python3 p7zip-full curl unzip build-essential
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-### Fedora
+### Fedora 41+ (dnf5)
 
 ```bash
-sudo dnf install nodejs npm python3 p7zip curl
+sudo dnf install nodejs npm python3 7zip curl unzip @development-tools
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+### Fedora &lt;41 (dnf)
+
+```bash
+sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip
 sudo dnf groupinstall 'Development Tools'
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 ### Arch
 
 ```bash
-sudo pacman -S nodejs npm python p7zip curl base-devel
+sudo pacman -S nodejs npm python p7zip curl unzip base-devel
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+After installing Rust, apply the PATH change to your current shell:
+
+```bash
+source "$HOME/.cargo/env"
 ```
 
 You also need the **Codex CLI**:
@@ -94,6 +118,66 @@ sudo dpkg -i dist/codex-desktop_*.deb
 This installs the app under `/opt/codex-desktop`, adds a launcher in `/usr/bin/codex-desktop`,
 and registers a desktop entry for app menus.
 
+The package also installs a local update manager:
+
+- `/usr/bin/codex-update-manager`
+- `/usr/lib/systemd/user/codex-update-manager.service`
+- `/opt/codex-desktop/update-builder/`
+
+The update manager is started on demand by the launcher and is responsible for:
+
+1. checking the upstream DMG on a timer
+2. downloading and hashing new DMGs
+3. rebuilding a local Linux package with the bundled builder scripts
+4. waiting until Codex Desktop is closed
+5. installing the rebuilt `.deb` through `pkexec`
+
+### Update manager state
+
+Runtime configuration and state live in standard XDG paths:
+
+```bash
+~/.config/codex-update-manager/config.toml
+~/.local/state/codex-update-manager/state.json
+~/.local/state/codex-update-manager/service.log
+~/.cache/codex-update-manager/
+```
+
+The Electron launcher also maintains:
+
+```bash
+~/.local/state/codex-desktop/app.pid
+```
+
+That PID file lets the update manager know whether the Electron app is still running before it attempts to install a pending package.
+
+## Local Update Manager
+
+The Debian package now installs a companion service named `codex-update-manager`.
+
+- It runs as a `systemd --user` service.
+- The launcher starts it in best-effort mode on first app launch.
+- It checks the upstream `Codex.dmg` on startup and every 6 hours.
+- When a new DMG is detected, it rebuilds a Linux `.deb` locally using the bundled
+  `update-builder` files under `/opt/codex-desktop/update-builder`.
+- If the app is open, the update stays pending until the Electron process exits.
+- When the app is closed, the service requests elevation with `pkexec` only for the final
+  `apt` or `dpkg` install step.
+
+You can inspect the service state with:
+
+```bash
+systemctl --user status codex-update-manager.service
+codex-update-manager status --json
+```
+
+The updater stores runtime files in:
+
+- `~/.config/codex-update-manager/config.toml`
+- `~/.local/state/codex-update-manager/state.json`
+- `~/.local/state/codex-update-manager/service.log`
+- `~/.cache/codex-update-manager/`
+
 ### Custom install directory
 
 ```bash
@@ -120,6 +204,19 @@ A small Python HTTP server is used as a workaround: when `app.isPackaged` is `fa
 | `CODEX_CLI_PATH` error | Install CLI: `npm i -g @openai/codex` |
 | GPU/rendering issues | Try: `./codex-app/start.sh --disable-gpu` |
 | Sandbox errors | The `--no-sandbox` flag is already set in `start.sh` |
+
+## Validate the packaged updater
+
+After changing updater or packaging logic, validate at least:
+
+```bash
+cargo test -p codex-update-manager
+bash -n install.sh
+bash -n scripts/build-deb.sh
+./scripts/build-deb.sh
+dpkg-deb -I dist/codex-desktop_*.deb
+dpkg-deb -c dist/codex-desktop_*.deb | rg 'codex-update-manager|update-builder|systemd/user'
+```
 
 ## Disclaimer
 

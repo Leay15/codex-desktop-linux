@@ -1,0 +1,21 @@
+[workflow]
+mode = "incremental"
+subagents_required = true
+runtime_config_path = "~/.config/codex-update-manager/config.toml"
+
+[commits]
+required = true
+policy = "commit_after_each_milestone"
+convention = "conventional_commits"
+
+[agents.worker]
+role = "implementation owner"
+
+[agents.tester]
+role = "automated test owner"
+
+[agents.qa]
+role = "manual flow verification"
+
+[agents.validator]
+role = "final gate for packaging, privileges, and release readiness"
