@@ -18,3 +18,4 @@ Thanks to everyone who has contributed to codex-desktop-linux!
 - [@khushveer007](https://github.com/khushveer007) — auto-update mechanism
 - [@DhanushSantosh](https://github.com/DhanushSantosh) — desktop entry lifecycle hardening
 - [@LAP87](https://github.com/LAP87) — Arch Linux updater support
+- [@lalalandau](https://github.com/lalalandau) — installer hardening and fresh-rebuild support

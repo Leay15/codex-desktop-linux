@@ -41,14 +41,21 @@ cleanup() {
 trap cleanup EXIT
 trap 'error "Failed at line $LINENO (exit code $?)"' ERR
 
-if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+CACHED_DMG_PATH="$SCRIPT_DIR/Codex.dmg"
+FRESH_INSTALL=0
+REUSE_CACHED_DMG=1
+PROVIDED_DMG_PATH=""
+
+usage() {
     cat <<'HELP'
-Usage: ./install.sh [OPTIONS]
+Usage: ./install.sh [OPTIONS] [path/to/Codex.dmg]
 
 Converts the official macOS Codex Desktop app to run on Linux.
 
 Options:
-  -h, --help    Show this help message and exit
+  -h, --help     Show this help message and exit
+  --fresh        Remove existing install directory and cached DMG before building
+  --reuse-dmg    Reuse cached Codex.dmg if present (default)
 
 Environment variables:
   CODEX_INSTALL_DIR   Override the install directory (default: ./codex-app)
@@ -56,8 +63,45 @@ Environment variables:
 After install, launch with:
   ./codex-app/start.sh
 HELP
-    exit 0
-fi
+}
+
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --fresh)
+                FRESH_INSTALL=1
+                REUSE_CACHED_DMG=0
+                ;;
+            --reuse-dmg)
+                REUSE_CACHED_DMG=1
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -*)
+                error "Unknown option: $1 (see --help)"
+                ;;
+            *)
+                [ -z "$PROVIDED_DMG_PATH" ] || error "Only one DMG path may be provided"
+                PROVIDED_DMG_PATH="$1"
+                ;;
+        esac
+        shift
+    done
+}
+
+prepare_install() {
+    if [ "$FRESH_INSTALL" -eq 1 ] && [ -d "$INSTALL_DIR" ]; then
+        info "Removing existing install directory: $INSTALL_DIR"
+        rm -rf "$INSTALL_DIR"
+    fi
+
+    if [ "$FRESH_INSTALL" -eq 1 ] && [ "$REUSE_CACHED_DMG" -ne 1 ] && [ -f "$CACHED_DMG_PATH" ]; then
+        info "Removing cached DMG: $CACHED_DMG_PATH"
+        rm -f "$CACHED_DMG_PATH"
+    fi
+}
 
 # ---- Check dependencies ----
 check_deps() {
@@ -100,7 +144,7 @@ Install a newer 7-zip (7zz), e.g.:
 
 # ---- Download or find Codex DMG ----
 get_dmg() {
-    local dmg_dest="$SCRIPT_DIR/Codex.dmg"
+    local dmg_dest="$CACHED_DMG_PATH"
 
     # Reuse existing DMG
     if [ -s "$dmg_dest" ]; then
@@ -133,18 +177,30 @@ extract_dmg() {
     local dmg_path="$1"
     info "Extracting DMG with 7z..."
 
+    local extract_dir="$WORK_DIR/dmg-extract"
     local seven_log="$WORK_DIR/7z.log"
-    if ! "$SEVEN_ZIP_CMD" x -y -snl "$dmg_path" -o"$WORK_DIR/dmg-extract" >"$seven_log" 2>&1; then
-        if grep -q "Dangerous link path was ignored" "$seven_log"; then
-            warn "7-zip reported a dangerous link inside the DMG. Continuing without it."
+    local seven_zip_status=0
+
+    mkdir -p "$extract_dir"
+    if "$SEVEN_ZIP_CMD" x -y -snl "$dmg_path" -o"$extract_dir" >"$seven_log" 2>&1; then
+        :
+    else
+        seven_zip_status=$?
+    fi
+
+    local app_dir
+    app_dir=$(find "$extract_dir" -maxdepth 3 -name "*.app" -type d | head -1)
+
+    if [ "$seven_zip_status" -ne 0 ]; then
+        if [ -n "$app_dir" ]; then
+            warn "7z exited with code $seven_zip_status but app bundle was found; continuing"
+            warn "$(tail -n 5 "$seven_log" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
         else
             cat "$seven_log" >&2
             error "Failed to extract DMG"
         fi
     fi
 
-    local app_dir
-    app_dir=$(find "$WORK_DIR/dmg-extract" -maxdepth 3 -name "*.app" -type d | head -1)
     [ -n "$app_dir" ] || error "Could not find .app bundle in DMG"
 
     info "Found: $(basename "$app_dir")"
@@ -453,11 +509,14 @@ main() {
     echo "============================================" >&2
     echo ""                                             >&2
 
+    parse_args "$@"
     check_deps
+    prepare_install
 
     local dmg_path=""
-    if [ $# -ge 1 ] && [ -f "$1" ]; then
-        dmg_path="$(realpath "$1")"
+    if [ -n "$PROVIDED_DMG_PATH" ]; then
+        [ -f "$PROVIDED_DMG_PATH" ] || error "Provided DMG not found: $PROVIDED_DMG_PATH"
+        dmg_path="$(realpath "$PROVIDED_DMG_PATH")"
         info "Using provided DMG: $dmg_path"
     else
         dmg_path=$(get_dmg)
