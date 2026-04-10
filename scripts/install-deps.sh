@@ -74,17 +74,6 @@ install_pacman() {
 # Pinned versions — prepend new entries as upstream releases them.
 # ---------------------------------------------------------------------------
 bootstrap_7zz() {
-    local sevenzip_arch
-    case "$ARCH" in
-        x86_64)  sevenzip_arch="x64"   ;;
-        aarch64) sevenzip_arch="arm64"  ;;
-        armv7l)  sevenzip_arch="arm"    ;;
-        *)
-            warn "Skipping 7zz bootstrap: unsupported architecture '$ARCH'"
-            return 0
-            ;;
-    esac
-
     # Already present and functional
     if command -v 7zz &>/dev/null && 7zz 2>&1 | grep -qm 1 "7-Zip"; then
         info "7zz already available ($(command -v 7zz))"
@@ -96,6 +85,17 @@ bootstrap_7zz() {
         info "System 7z is already new enough; skipping 7zz bootstrap"
         return 0
     fi
+
+    local sevenzip_arch
+    case "$ARCH" in
+        x86_64)  sevenzip_arch="x64"   ;;
+        aarch64) sevenzip_arch="arm64"  ;;
+        armv7l)  sevenzip_arch="arm"    ;;
+        *)
+            warn "Skipping 7zz bootstrap: unsupported architecture '$ARCH'"
+            return 0
+            ;;
+    esac
 
     local install_dir="$HOME/.local/bin"
     if [ "${SEVENZIP_SYSTEM_INSTALL:-0}" = "1" ]; then
