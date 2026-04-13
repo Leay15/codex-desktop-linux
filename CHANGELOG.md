@@ -3,7 +3,7 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [0.4.6] - 2026-04-11
+## [0.4.0] - 2026-04-13
 
 ### Added
 
@@ -17,7 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Linux ASAR patching now also adjusts shell behavior, window icon handling, and default opaque window settings on Linux when the user has not explicitly chosen a translucent sidebar preference yet.
 - Desktop notifications now resolve icons from packaged, system, and repository locations and send them as file URIs for better desktop-environment compatibility.
 - `scripts/install-deps.sh` now owns the `7zz` bootstrap flow, probes pinned upstream tarballs newest-first with `HEAD` checks, and installs to `~/.local/bin` by default unless `SEVENZIP_SYSTEM_INSTALL=1`.
-- Updated bundled dependencies and metadata: Electron `40.8.5`, `tokio` `1.51.1`, `windows-sys` `0.61.2`, and `codex-update-manager` `0.4.6`.
+- Updated bundled dependencies and metadata: Electron `40.8.5`, `tokio` `1.51.1`, `windows-sys` `0.61.2`, and `codex-update-manager` `0.4.0`.
 
 ### Fixed
 

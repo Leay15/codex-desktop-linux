@@ -112,7 +112,7 @@ Do not assume `codex-app/` is pristine. If behavior differs from `install.sh`, p
 
 ## Crate Versioning
 
-- Current updater crate version: `0.4.6`
+- Current updater crate version: `0.4.0`
 - Bump `patch` for fixes, docs, and maintenance-only updates.
 - Bump `minor` for compatible feature additions.
 - Bump `major` for incompatible CLI, persisted-state, or install-flow changes.
