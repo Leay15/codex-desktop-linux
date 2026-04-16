@@ -200,7 +200,11 @@ echo 'alias codex-desktop="~/codex-desktop-linux/codex-app/start.sh"' >> ~/.bash
 
 The repository can build a Debian, RPM, or pacman package from the generated `codex-app/` directory.
 
+**Prerequisite:** Run `make build-app` (or `./install.sh`) first to produce `codex-app/`. The packaging scripts only repackage what is already there — they do not download or extract the DMG themselves.
+
 ### Debian
+
+Requires `codex-app/` to exist (run `make build-app` first).
 
 ```bash
 ./scripts/build-deb.sh
@@ -220,6 +224,8 @@ dist/codex-desktop_YYYY.MM.DD.HHMMSS_amd64.deb
 
 ### RPM
 
+Requires `codex-app/` to exist (run `make build-app` first).
+
 ```bash
 ./scripts/build-rpm.sh
 ```
@@ -237,6 +243,8 @@ dist/codex-desktop-YYYY.MM.DD.HHMMSS-<release>.x86_64.rpm
 ```
 
 ### Arch Linux (pacman)
+
+Requires `codex-app/` to exist (run `make build-app` first).
 
 ```bash
 ./scripts/build-pacman.sh
