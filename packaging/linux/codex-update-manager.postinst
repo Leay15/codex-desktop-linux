@@ -1,50 +1,11 @@
 #!/bin/sh
 set -eu
 
-SERVICE_NAME="codex-update-manager.service"
-
-for runtime_dir in /run/user/*; do
-    [ -d "$runtime_dir" ] || continue
-
-    uid="$(basename "$runtime_dir")"
-    case "$uid" in
-        ''|*[!0-9]*|0)
-            continue
-            ;;
-    esac
-
-    bus="$runtime_dir/bus"
-    [ -S "$bus" ] || continue
-
-    user_name="$(getent passwd "$uid" | cut -d: -f1 || true)"
-    [ -n "$user_name" ] || continue
-
-    runuser -u "$user_name" -- env \
-        XDG_RUNTIME_DIR="$runtime_dir" \
-        DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" \
-        systemctl --user daemon-reload >/dev/null 2>&1 || true
-
-    if runuser -u "$user_name" -- env \
-        XDG_RUNTIME_DIR="$runtime_dir" \
-        DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" \
-        systemctl --user is-active "$SERVICE_NAME" >/dev/null 2>&1; then
-        continue
-    fi
-
-    if runuser -u "$user_name" -- env \
-        XDG_RUNTIME_DIR="$runtime_dir" \
-        DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" \
-        systemctl --user is-enabled "$SERVICE_NAME" >/dev/null 2>&1; then
-        runuser -u "$user_name" -- env \
-            XDG_RUNTIME_DIR="$runtime_dir" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" \
-            systemctl --user start "$SERVICE_NAME" >/dev/null 2>&1 || true
-    else
-        runuser -u "$user_name" -- env \
-            XDG_RUNTIME_DIR="$runtime_dir" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" \
-            systemctl --user enable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
-    fi
-done
+SERVICE_HELPER="/opt/codex-desktop/update-builder/packaging/linux/codex-update-manager-user-service.sh"
+if [ -f "$SERVICE_HELPER" ]; then
+    # shellcheck source=/opt/codex-desktop/update-builder/packaging/linux/codex-update-manager-user-service.sh
+    . "$SERVICE_HELPER"
+    codex_ensure_user_service_running || true
+fi
 
 exit 0
