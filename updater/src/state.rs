@@ -3,7 +3,14 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, fs, path::Path, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    process,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -120,7 +127,7 @@ impl PersistedState {
     /// Persists the updater state to JSON on disk.
     pub fn save(&self, path: &Path) -> Result<()> {
         let content = serde_json::to_string_pretty(self)?;
-        fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))?;
+        atomic_write(path, content.as_bytes())?;
         Ok(())
     }
 
@@ -129,6 +136,57 @@ impl PersistedState {
         self.status = UpdateStatus::Failed;
         self.error_message = Some(message.into());
     }
+}
+
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create {}", parent.display()))?;
+
+    let temp_path = atomic_temp_path(path);
+    let mut temp_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .with_context(|| format!("Failed to create {}", temp_path.display()))?;
+
+    let write_result = (|| -> Result<()> {
+        temp_file
+            .write_all(contents)
+            .with_context(|| format!("Failed to write {}", temp_path.display()))?;
+        temp_file
+            .sync_all()
+            .with_context(|| format!("Failed to sync {}", temp_path.display()))?;
+        Ok(())
+    })();
+
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+
+    fs::rename(&temp_path, path).with_context(|| {
+        format!(
+            "Failed to atomically replace {} with {}",
+            path.display(),
+            temp_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn atomic_temp_path(path: &Path) -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state.json");
+    path.with_file_name(format!(".{file_name}.tmp.{}.{}", process::id(), timestamp))
 }
 
 #[cfg(test)]
@@ -227,5 +285,29 @@ mod tests {
             json.contains("\"deb_path\""),
             "JSON key must remain deb_path for backward compat"
         );
+    }
+
+    #[test]
+    fn save_writes_state_atomically_without_temp_file_left_behind() -> Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("state.json");
+        let mut state = PersistedState::new(true);
+        state.installed_version = "2026.04.20.120000".to_string();
+
+        state.save(&path)?;
+
+        let content = fs::read_to_string(&path)?;
+        assert!(content.contains("\"installed_version\": \"2026.04.20.120000\""));
+
+        let leftover_temp_files = fs::read_dir(temp.path())?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp."))
+            .collect::<Vec<_>>();
+        assert!(
+            leftover_temp_files.is_empty(),
+            "temporary files should be cleaned up after atomic save: {leftover_temp_files:?}"
+        );
+        Ok(())
     }
 }

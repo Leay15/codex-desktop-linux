@@ -3,6 +3,26 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.1] - 2026-04-19
+
+### Added
+
+- Debian `postinst` maintainer script for `codex-update-manager` so package installs and upgrades can reload user managers and bring the updater service back online.
+
+### Changed
+
+- Native package install and upgrade flows now make a best-effort attempt to start or re-enable `codex-update-manager.service` for active user sessions across Debian, RPM, and pacman packaging paths.
+- `codex-update-manager status` now refreshes cached CLI status before printing and surfaces the current CLI error message in plain-text output.
+- Native package maintainer hooks now share a single `codex-update-manager-user-service.sh` helper for `systemd --user` reload, start, enable, stop, and disable behavior across Debian, RPM, and pacman packaging paths.
+- Packaging hook scripts now use explicit `shellcheck source=...` directives when sourcing the installed user-service helper so static linting can resolve the shared helper path cleanly.
+
+### Fixed
+
+- Restored the final success notification after automatic installs by replaying the `Installed` notification when the updater recovers from an interrupted `Installing` state or daemon restart.
+- Deduplicated `Installed` notifications so successful recovery does not spam repeated desktop toasts.
+- Hardened Codex CLI version-check caching and error handling so stale cached data does not mask a changed local CLI version or a failed version read.
+- `PersistedState::save` now replaces `state.json` atomically with a temporary file and rename, so ad-hoc `codex-update-manager status` refreshes cannot leave partially written updater state behind during concurrent access.
+
 ## [0.4.0] - 2026-04-13
 
 ### Added

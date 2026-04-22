@@ -8,6 +8,7 @@ DIST_DIR="${DIST_DIR_OVERRIDE:-$REPO_DIR/dist}"
 SPEC_TEMPLATE="$REPO_DIR/packaging/linux/codex-desktop.spec"
 DESKTOP_TEMPLATE="$REPO_DIR/packaging/linux/codex-desktop.desktop"
 SERVICE_TEMPLATE="$REPO_DIR/packaging/linux/codex-update-manager.service"
+USER_SERVICE_HELPER_TEMPLATE="$REPO_DIR/packaging/linux/codex-update-manager-user-service.sh"
 ICON_SOURCE="$REPO_DIR/assets/codex.png"
 
 PACKAGE_NAME="${PACKAGE_NAME:-codex-desktop}"
@@ -63,6 +64,7 @@ main() {
     [ -f "$SPEC_TEMPLATE" ] || error "Missing spec template: $SPEC_TEMPLATE"
     [ -f "$DESKTOP_TEMPLATE" ] || error "Missing desktop template: $DESKTOP_TEMPLATE"
     [ -f "$UPDATER_SERVICE_SOURCE" ] || error "Missing updater service template: $UPDATER_SERVICE_SOURCE"
+    [ -f "$USER_SERVICE_HELPER_TEMPLATE" ] || error "Missing updater user service helper: $USER_SERVICE_HELPER_TEMPLATE"
     [ -f "$ICON_SOURCE" ] || error "Missing icon: $ICON_SOURCE"
     command -v rpmbuild >/dev/null 2>&1 || error "rpmbuild is required (install rpm-build)"
 
@@ -107,6 +109,8 @@ main() {
     cp "$REPO_DIR/packaging/linux/codex-desktop.spec" "$update_builder_dir/packaging/linux/codex-desktop.spec"
     cp "$REPO_DIR/packaging/linux/control" "$update_builder_dir/packaging/linux/control"
     cp "$REPO_DIR/packaging/linux/codex-desktop.desktop" "$update_builder_dir/packaging/linux/codex-desktop.desktop"
+    cp "$USER_SERVICE_HELPER_TEMPLATE" \
+        "$update_builder_dir/packaging/linux/codex-update-manager-user-service.sh"
     cp "$UPDATER_SERVICE_SOURCE" "$update_builder_dir/packaging/linux/codex-update-manager.service"
     cp "$REPO_DIR/assets/codex.png" "$update_builder_dir/assets/codex.png"
 

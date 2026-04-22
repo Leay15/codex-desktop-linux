@@ -44,7 +44,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             print_path,
             allow_install_missing,
         ),
-        Commands::Status { json } => run_status(state, json),
+        Commands::Status { json } => run_status(&mut state, &paths, json),
         Commands::InstallDeb { path } => install::install_deb(&path),
         Commands::InstallRpm { path } => install::install_rpm(&path),
         Commands::InstallPacman { path } => install::install_pacman(&path),
@@ -112,6 +112,7 @@ async fn run_daemon(
 ) -> Result<()> {
     sync_and_persist(config, state, paths)?;
     recover_interrupted_install(state, paths)?;
+    maybe_notify_installed(state, paths, config.notifications)?;
     if packaged_runtime_removed(config) {
         info!("packaged app files are gone; stopping updater daemon");
         return Ok(());
@@ -166,13 +167,16 @@ async fn run_check_now(
 ) -> Result<()> {
     sync_and_persist(config, state, paths)?;
     recover_interrupted_install(state, paths)?;
+    maybe_notify_installed(state, paths, config.notifications)?;
     run_check_cycle(config, state, paths).await?;
     reconcile_pending_install(config, state, paths).await
 }
 
-fn run_status(state: PersistedState, json: bool) -> Result<()> {
+fn run_status(state: &mut PersistedState, paths: &RuntimePaths, json: bool) -> Result<()> {
+    codex_cli::refresh_status(state, paths)?;
+
     if json {
-        println!("{}", serde_json::to_string_pretty(&state)?);
+        println!("{}", serde_json::to_string_pretty(state)?);
     } else {
         println!("status: {:?}", state.status);
         println!("installed_version: {}", state.installed_version);
@@ -188,6 +192,10 @@ fn run_status(state: PersistedState, json: bool) -> Result<()> {
         println!(
             "cli_latest_version: {}",
             state.cli_latest_version.as_deref().unwrap_or("unknown")
+        );
+        println!(
+            "cli_error: {}",
+            state.cli_error_message.as_deref().unwrap_or("none")
         );
     }
 
@@ -462,6 +470,25 @@ fn maybe_notify(
     Ok(())
 }
 
+fn maybe_notify_installed(
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    enabled: bool,
+) -> Result<()> {
+    if state.status != UpdateStatus::Installed {
+        return Ok(());
+    }
+
+    maybe_notify(
+        state,
+        paths,
+        enabled,
+        "installed",
+        "Codex Desktop updated",
+        "The new package is installed and will be used the next time you open the app.",
+    )
+}
+
 async fn trigger_install(
     state: &mut PersistedState,
     paths: &RuntimePaths,
@@ -489,10 +516,7 @@ async fn trigger_install(
         state.error_message = None;
         state.notified_events.clear();
         persist_state(paths, state)?;
-        let _ = notify::send(
-            "Codex Desktop updated",
-            "The new package is installed and will be used the next time you open the app.",
-        );
+        let _ = maybe_notify_installed(state, paths, true);
         return Ok(());
     }
 
@@ -823,6 +847,34 @@ mod tests {
         )?;
 
         assert_eq!(state.notified_events.len(), notified_count);
+        Ok(())
+    }
+
+    #[test]
+    fn installed_notifications_are_deduplicated_after_recovery() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let paths = RuntimePaths {
+            config_file: temp.path().join("config/config.toml"),
+            state_file: temp.path().join("state/state.json"),
+            log_file: temp.path().join("state/service.log"),
+            cache_dir: temp.path().join("cache"),
+            state_dir: temp.path().join("state"),
+            config_dir: temp.path().join("config"),
+        };
+        paths.ensure_dirs()?;
+
+        let mut state = PersistedState::new(true);
+        state.status = UpdateStatus::Installed;
+        state.installed_version = "2026.04.16.120000".to_string();
+
+        maybe_notify_installed(&mut state, &paths, false)?;
+        let notified_count = state.notified_events.len();
+        maybe_notify_installed(&mut state, &paths, false)?;
+
+        assert_eq!(state.notified_events.len(), notified_count);
+        assert!(state
+            .notified_events
+            .contains("installed:2026.04.16.120000"));
         Ok(())
     }
 }

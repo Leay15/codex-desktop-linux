@@ -4,7 +4,7 @@ Run [OpenAI Codex Desktop](https://openai.com/codex/) on Linux.
 
 The official Codex Desktop app is macOS-only. This project converts the upstream macOS `Codex.dmg` into a runnable Linux Electron app, packages it as `.deb`, `.rpm`, or pacman artifacts, and includes a local updater that rebuilds future Linux packages from newer upstream DMGs.
 
-`codex-update-manager` current crate version: `0.4.0`
+`codex-update-manager` current crate version: `0.4.1`
 
 SemVer policy for the crate:
 

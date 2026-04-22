@@ -1,6 +1,15 @@
+SERVICE_HELPER="/opt/codex-desktop/update-builder/packaging/linux/codex-update-manager-user-service.sh"
+if [ -f "$SERVICE_HELPER" ]; then
+    # shellcheck source=/opt/codex-desktop/update-builder/packaging/linux/codex-update-manager-user-service.sh
+    . "$SERVICE_HELPER"
+fi
+
 post_install() {
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+    fi
+    if [ -f "$SERVICE_HELPER" ]; then
+        codex_ensure_user_service_running || true
     fi
 }
 
@@ -9,63 +18,14 @@ post_upgrade() {
 }
 
 pre_remove() {
-    if ! command -v runuser >/dev/null 2>&1 || ! command -v systemctl >/dev/null 2>&1; then
-        return
+    if [ -f "$SERVICE_HELPER" ]; then
+        codex_cleanup_user_service stop || true
+        codex_cleanup_user_service disable || true
     fi
-
-    for runtime_dir in /run/user/*; do
-        [ -d "$runtime_dir" ] || continue
-
-        uid="$(basename "$runtime_dir")"
-        case "$uid" in
-            ''|*[!0-9]*|0) continue ;;
-        esac
-
-        bus="$runtime_dir/bus"
-        [ -S "$bus" ] || continue
-
-        user_name="$(getent passwd "$uid" | cut -d: -f1 || true)"
-        [ -n "$user_name" ] || continue
-
-        runuser -u "$user_name" -- env \
-            XDG_RUNTIME_DIR="$runtime_dir" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" \
-            systemctl --user stop codex-update-manager.service >/dev/null 2>&1 || true
-
-        runuser -u "$user_name" -- env \
-            XDG_RUNTIME_DIR="$runtime_dir" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" \
-            systemctl --user disable codex-update-manager.service >/dev/null 2>&1 || true
-
-        runuser -u "$user_name" -- env \
-            XDG_RUNTIME_DIR="$runtime_dir" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" \
-            systemctl --user daemon-reload >/dev/null 2>&1 || true
-    done
 }
 
 post_remove() {
-    if ! command -v runuser >/dev/null 2>&1 || ! command -v systemctl >/dev/null 2>&1; then
-        return
+    if [ -f "$SERVICE_HELPER" ]; then
+        codex_reload_user_managers || true
     fi
-
-    for runtime_dir in /run/user/*; do
-        [ -d "$runtime_dir" ] || continue
-
-        uid="$(basename "$runtime_dir")"
-        case "$uid" in
-            ''|*[!0-9]*|0) continue ;;
-        esac
-
-        bus="$runtime_dir/bus"
-        [ -S "$bus" ] || continue
-
-        user_name="$(getent passwd "$uid" | cut -d: -f1 || true)"
-        [ -n "$user_name" ] || continue
-
-        runuser -u "$user_name" -- env \
-            XDG_RUNTIME_DIR="$runtime_dir" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" \
-            systemctl --user daemon-reload >/dev/null 2>&1 || true
-    done
 }
