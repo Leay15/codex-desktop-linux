@@ -10,12 +10,18 @@ DESKTOP_TEMPLATE="$REPO_DIR/packaging/linux/codex-desktop.desktop"
 SERVICE_TEMPLATE="$REPO_DIR/packaging/linux/codex-update-manager.service"
 USER_SERVICE_HELPER_TEMPLATE="$REPO_DIR/packaging/linux/codex-update-manager-user-service.sh"
 ICON_SOURCE="$REPO_DIR/assets/codex.png"
+PACKAGED_RUNTIME_TEMPLATE="$REPO_DIR/packaging/linux/codex-packaged-runtime.sh"
 
 PACKAGE_NAME="${PACKAGE_NAME:-codex-desktop}"
 PACKAGE_VERSION="${PACKAGE_VERSION:-$(date -u +%Y.%m.%d.%H%M%S)}"
 UPDATER_BINARY_SOURCE="${UPDATER_BINARY_SOURCE:-$REPO_DIR/target/release/codex-update-manager}"
 UPDATER_SERVICE_SOURCE="${UPDATER_SERVICE_SOURCE:-$SERVICE_TEMPLATE}"
+PACKAGED_RUNTIME_SOURCE="${PACKAGED_RUNTIME_SOURCE:-$PACKAGED_RUNTIME_TEMPLATE}"
 UPDATE_BUILDER_ROOT_PLACEHOLDER="__UPDATE_BUILDER_ROOT__"
+
+# Keep the installed update-builder payload aligned with the other package formats.
+# shellcheck source=scripts/lib/package-common.sh
+. "$REPO_DIR/scripts/lib/package-common.sh"
 
 info()  { echo "[INFO] $*" >&2; }
 error() { echo "[ERROR] $*" >&2; exit 1; }
@@ -66,6 +72,7 @@ main() {
     [ -f "$UPDATER_SERVICE_SOURCE" ] || error "Missing updater service template: $UPDATER_SERVICE_SOURCE"
     [ -f "$USER_SERVICE_HELPER_TEMPLATE" ] || error "Missing updater user service helper: $USER_SERVICE_HELPER_TEMPLATE"
     [ -f "$ICON_SOURCE" ] || error "Missing icon: $ICON_SOURCE"
+    [ -f "$PACKAGED_RUNTIME_SOURCE" ] || error "Missing packaged launcher runtime helper: $PACKAGED_RUNTIME_SOURCE"
     command -v rpmbuild >/dev/null 2>&1 || error "rpmbuild is required (install rpm-build)"
 
     ensure_updater_binary
@@ -82,37 +89,9 @@ main() {
     trap "rm -rf '$build_root'" EXIT
 
     local staging_root="$build_root/STAGING"
-    local update_builder_dir="$staging_root/opt/$PACKAGE_NAME/update-builder"
 
-    mkdir -p \
-        "$staging_root/opt/$PACKAGE_NAME" \
-        "$staging_root/usr/bin" \
-        "$staging_root/usr/lib/systemd/user" \
-        "$staging_root/usr/share/applications" \
-        "$staging_root/usr/share/icons/hicolor/256x256/apps"
-
-    cp -a "$APP_DIR/." "$staging_root/opt/$PACKAGE_NAME/"
-    cp "$DESKTOP_TEMPLATE" "$staging_root/usr/share/applications/$PACKAGE_NAME.desktop"
-    cp "$ICON_SOURCE" "$staging_root/usr/share/icons/hicolor/256x256/apps/$PACKAGE_NAME.png"
-    cp "$UPDATER_BINARY_SOURCE" "$staging_root/usr/bin/codex-update-manager"
-    chmod 0755 "$staging_root/usr/bin/codex-update-manager"
-    cp "$UPDATER_SERVICE_SOURCE" "$staging_root/usr/lib/systemd/user/codex-update-manager.service"
-    chmod 0644 "$staging_root/usr/lib/systemd/user/codex-update-manager.service"
-
-    mkdir -p \
-        "$update_builder_dir/scripts" \
-        "$update_builder_dir/packaging/linux" \
-        "$update_builder_dir/assets"
-    cp "$REPO_DIR/install.sh" "$update_builder_dir/install.sh"
-    cp "$REPO_DIR/scripts/build-rpm.sh" "$update_builder_dir/scripts/build-rpm.sh"
-    cp "$REPO_DIR/scripts/build-deb.sh" "$update_builder_dir/scripts/build-deb.sh"
-    cp "$REPO_DIR/packaging/linux/codex-desktop.spec" "$update_builder_dir/packaging/linux/codex-desktop.spec"
-    cp "$REPO_DIR/packaging/linux/control" "$update_builder_dir/packaging/linux/control"
-    cp "$REPO_DIR/packaging/linux/codex-desktop.desktop" "$update_builder_dir/packaging/linux/codex-desktop.desktop"
-    cp "$USER_SERVICE_HELPER_TEMPLATE" \
-        "$update_builder_dir/packaging/linux/codex-update-manager-user-service.sh"
-    cp "$UPDATER_SERVICE_SOURCE" "$update_builder_dir/packaging/linux/codex-update-manager.service"
-    cp "$REPO_DIR/assets/codex.png" "$update_builder_dir/assets/codex.png"
+    stage_common_package_files "$staging_root"
+    stage_update_builder_bundle "$staging_root"
 
     cat > "$staging_root/usr/bin/$PACKAGE_NAME" <<SCRIPT
 #!/bin/bash

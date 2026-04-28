@@ -1,6 +1,10 @@
 #!/bin/bash
 
 codex_packaged_runtime_prelaunch() {
+    codex_packaged_runtime_prelaunch_background >/dev/null 2>&1 &
+}
+
+codex_packaged_runtime_prelaunch_background() {
     if ! command -v systemctl >/dev/null 2>&1; then
         return 0
     fi
@@ -32,10 +36,29 @@ codex_packaged_runtime_prelaunch() {
     fi
 
     if systemctl --user is-enabled codex-update-manager.service >/dev/null 2>&1; then
-        systemctl --user restart codex-update-manager.service >/dev/null 2>&1 || true
+        systemctl --user start codex-update-manager.service >/dev/null 2>&1 || true
     else
         systemctl --user enable --now codex-update-manager.service >/dev/null 2>&1 || true
     fi
+
+    codex_packaged_runtime_trigger_update_check
+}
+
+codex_packaged_runtime_trigger_update_check() {
+    if ! command -v codex-update-manager >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        systemd-run --user \
+            --unit=codex-update-manager-launch-check \
+            --collect \
+            --quiet \
+            /usr/bin/codex-update-manager check-now --if-stale >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    codex-update-manager check-now --if-stale >/dev/null 2>&1 || true
 }
 
 codex_packaged_runtime_export_env() {

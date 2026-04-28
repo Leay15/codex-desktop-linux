@@ -1,6 +1,6 @@
 #!/bin/bash
 # install-deps.sh — Install system dependencies for Codex Desktop Linux
-# Supports: Debian/Ubuntu (apt), Fedora 41+ (dnf5), Fedora <41 (dnf), Arch (pacman)
+# Supports: Debian/Ubuntu (apt), Fedora 41+ (dnf5), Fedora <41 (dnf), Arch (pacman), openSUSE (zypper)
 # Also installs the Rust toolchain (cargo) via rustup when not already present.
 set -Eeuo pipefail
 
@@ -26,6 +26,8 @@ detect_distro() {
         echo "dnf"
     elif command -v pacman &>/dev/null; then
         echo "pacman"
+    elif command -v zypper &>/dev/null; then
+        echo "zypper"
     else
         echo "unknown"
     fi
@@ -67,6 +69,14 @@ install_pacman() {
         nodejs npm python \
         p7zip curl unzip zstd \
         base-devel
+}
+
+install_zypper() {
+    info "Detected openSUSE (zypper)"
+    sudo zypper --non-interactive install \
+        nodejs-default npm-default python3 \
+        p7zip-full curl unzip
+    sudo zypper --non-interactive install -t pattern devel_basis
 }
 
 # ---------------------------------------------------------------------------
@@ -182,13 +192,16 @@ case "$DISTRO" in
     dnf5)    install_dnf5   ;;
     dnf)     install_dnf    ;;
     pacman)  install_pacman ;;
+    zypper)  install_zypper ;;
     *)
         error "Unsupported package manager. Install manually:
   sudo apt install nodejs npm python3 p7zip-full curl unzip build-essential         # Debian/Ubuntu
   sudo dnf install nodejs npm python3 7zip curl unzip @development-tools            # Fedora 41+ (dnf5)
   sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip                # Fedora <41 (dnf)
     && sudo dnf groupinstall 'Development Tools'
-  sudo pacman -S nodejs npm python p7zip curl unzip zstd base-devel                 # Arch"
+  sudo pacman -S nodejs npm python p7zip curl unzip zstd base-devel                 # Arch
+  sudo zypper install nodejs-default npm-default python3 p7zip-full curl unzip      # openSUSE
+    && sudo zypper install -t pattern devel_basis"
         ;;
 esac
 

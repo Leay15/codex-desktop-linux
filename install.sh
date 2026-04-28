@@ -9,7 +9,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_ROOT="${CODEX_INSTALL_ROOT:-$SCRIPT_DIR}"
 INSTALL_DIR="${CODEX_INSTALL_DIR:-$INSTALL_ROOT/codex-app}"
-ELECTRON_VERSION="40.8.5"
+ELECTRON_VERSION="41.3.0"
 WORK_DIR="$(mktemp -d)"
 ARCH="$(uname -m)"
 ICON_SOURCE="$SCRIPT_DIR/assets/codex.png"
@@ -34,6 +34,8 @@ Or install manually:
   sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip                # Fedora <41 (dnf)
     && sudo dnf groupinstall 'Development Tools'
   sudo pacman -S nodejs npm python p7zip curl unzip zstd base-devel                 # Arch
+  sudo zypper install nodejs-default npm-default python3 p7zip-full curl unzip      # openSUSE
+    && sudo zypper install -t pattern devel_basis
 EOF
 }
 
@@ -348,6 +350,7 @@ LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/codex-desktop"
 LOG_FILE="$LOG_DIR/launcher.log"
 APP_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codex-desktop"
 APP_PID_FILE="$APP_STATE_DIR/app.pid"
+WEBVIEW_PID_FILE="$APP_STATE_DIR/webview.pid"
 PACKAGED_RUNTIME_HELPER="$SCRIPT_DIR/.codex-linux/codex-packaged-runtime.sh"
 APP_NOTIFICATION_ICON_NAME="codex-desktop"
 APP_NOTIFICATION_ICON_BUNDLE="$SCRIPT_DIR/.codex-linux/$APP_NOTIFICATION_ICON_NAME.png"
@@ -355,6 +358,10 @@ APP_NOTIFICATION_ICON_SYSTEM="/usr/share/icons/hicolor/256x256/apps/$APP_NOTIFIC
 APP_NOTIFICATION_ICON_REPO="$SCRIPT_DIR/../assets/codex.png"
 
 mkdir -p "$LOG_DIR" "$APP_STATE_DIR"
+STARTED_WEBVIEW_PID=""
+ELECTRON_PID=""
+RUNNING_APP_PID=""
+WARM_START=0
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     cat <<'HELP'
@@ -379,6 +386,24 @@ exec >>"$LOG_FILE" 2>&1
 
 echo "[$(date -Is)] Starting Codex Desktop launcher"
 
+now_ms() {
+    local value
+    value="$(date +%s%3N 2>/dev/null || true)"
+    case "$value" in
+        *N*|"") echo "$(($(date +%s) * 1000))" ;;
+        *) echo "$value" ;;
+    esac
+}
+
+LAUNCHER_START_MS="$(now_ms)"
+
+log_phase() {
+    local phase="$1"
+    local elapsed_ms
+    elapsed_ms="$(($(now_ms) - LAUNCHER_START_MS))"
+    echo "[$(date -Is)] launcher_phase=$phase elapsedMs=$elapsed_ms"
+}
+
 load_packaged_runtime_helper() {
     if [ -f "$PACKAGED_RUNTIME_HELPER" ]; then
         # shellcheck disable=SC1090
@@ -399,13 +424,29 @@ export_packaged_runtime_env() {
 }
 
 run_cli_preflight() {
+    local allow_install_missing="${1:-0}"
     if ! command -v codex-update-manager >/dev/null 2>&1; then
+        if [ "$allow_install_missing" = "1" ]; then
+            return 1
+        fi
         return 0
     fi
 
+    local -a preflight_args=(
+        cli-preflight
+        --cli-path "$CODEX_CLI_PATH"
+        --print-path
+    )
+    if [ "$allow_install_missing" = "1" ]; then
+        preflight_args+=(--allow-install-missing)
+    fi
+
     local refreshed_path=""
-    if ! refreshed_path="$(codex-update-manager cli-preflight --cli-path "$CODEX_CLI_PATH" --print-path)"; then
-        notify_error "Codex CLI prelaunch update check failed. Continuing with the current CLI. Check the launcher and updater logs if Codex Desktop misbehaves."
+    if ! refreshed_path="$(codex-update-manager "${preflight_args[@]}")"; then
+        if [ "$allow_install_missing" = "1" ]; then
+            return 1
+        fi
+        notify_error "Codex CLI prelaunch check failed. Continuing with the current CLI state. Check the launcher and updater logs if Codex Desktop misbehaves."
         return 0
     fi
 
@@ -413,6 +454,47 @@ run_cli_preflight() {
         CODEX_CLI_PATH="$refreshed_path"
         export CODEX_CLI_PATH
     fi
+}
+
+run_cli_preflight_background() {
+    if ! command -v codex-update-manager >/dev/null 2>&1; then
+        return 0
+    fi
+
+    (
+        if ! codex-update-manager cli-preflight --cli-path "$CODEX_CLI_PATH" --print-path >/dev/null 2>&1; then
+            echo "Codex CLI background preflight failed. Continuing with the current CLI."
+        fi
+    ) &
+}
+
+is_interactive_terminal() {
+    [ -t 0 ] && [ -t 1 ]
+}
+
+prompt_install_missing_cli() {
+    if ! is_interactive_terminal; then
+        return 1
+    fi
+
+    if ! command -v codex-update-manager >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local reply=""
+    printf 'Codex CLI is not installed. Install it now? [Y/n] '
+    if ! read -r reply; then
+        return 1
+    fi
+
+    case "$reply" in
+        ""|y|Y|yes|YES|Yes)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 resolve_notification_icon() {
@@ -480,6 +562,63 @@ notify_error() {
     fi
 }
 
+canonical_path() {
+    readlink -f "$1" 2>/dev/null || echo "$1"
+}
+
+pid_is_current_user() {
+    local pid="$1"
+    local uid
+
+    uid="$(awk '/^Uid:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)"
+    [ "$uid" = "$(id -u)" ]
+}
+
+pid_matches_executable() {
+    local pid="$1"
+    local expected="$2"
+    local actual
+
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    [ -d "/proc/$pid" ] || return 1
+    pid_is_current_user "$pid" || return 1
+    actual="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+    [ "$actual" = "$(canonical_path "$expected")" ]
+}
+
+find_running_app_pid() {
+    local pid
+
+    if [ -f "$APP_PID_FILE" ]; then
+        pid="$(cat "$APP_PID_FILE" 2>/dev/null || true)"
+        if pid_matches_executable "$pid" "$SCRIPT_DIR/electron"; then
+            echo "$pid"
+            return 0
+        fi
+    fi
+
+    local proc_exe
+    for proc_exe in /proc/[0-9]*/exe; do
+        [ -e "$proc_exe" ] || continue
+        pid="${proc_exe#/proc/}"
+        pid="${pid%/exe}"
+        if pid_matches_executable "$pid" "$SCRIPT_DIR/electron"; then
+            echo "$pid"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+detect_warm_start() {
+    if RUNNING_APP_PID="$(find_running_app_pid)"; then
+        WARM_START=1
+        echo "$RUNNING_APP_PID" > "$APP_PID_FILE"
+        echo "Detected running Codex Desktop pid=$RUNNING_APP_PID; using warm-start handoff"
+    fi
+}
+
 wait_for_webview_server() {
     echo "Waiting for webview server on :5175"
 
@@ -516,38 +655,124 @@ if missing:
 PY
 }
 
-clear_stale_pid_file() {
-    if [ ! -f "$APP_PID_FILE" ]; then
+pid_is_webview_server() {
+    local pid="$1"
+    local cmdline
+    local cwd
+
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    [ -d "/proc/$pid" ] || return 1
+    pid_is_current_user "$pid" || return 1
+    cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+    [[ "$cmdline" == *"http.server 5175"* ]] || return 1
+    cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+    [ "$cwd" = "$(canonical_path "$WEBVIEW_DIR")" ]
+}
+
+stop_owned_webview_server() {
+    local pid=""
+
+    if [ -f "$WEBVIEW_PID_FILE" ]; then
+        pid="$(cat "$WEBVIEW_PID_FILE" 2>/dev/null || true)"
+    fi
+
+    if [ -n "$pid" ] && pid_is_webview_server "$pid"; then
+        echo "Stopping owned webview server pid=$pid"
+        kill "$pid" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.05
+        done
+    fi
+
+    rm -f "$WEBVIEW_PID_FILE"
+}
+
+owned_webview_server_pid() {
+    local pid=""
+
+    if [ -f "$WEBVIEW_PID_FILE" ]; then
+        pid="$(cat "$WEBVIEW_PID_FILE" 2>/dev/null || true)"
+    fi
+
+    if [ -n "$pid" ] && pid_is_webview_server "$pid"; then
+        echo "$pid"
         return 0
     fi
 
-    local pid=""
-    pid="$(cat "$APP_PID_FILE" 2>/dev/null || true)"
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-        rm -f "$APP_PID_FILE"
+    if [ -n "$pid" ]; then
+        rm -f "$WEBVIEW_PID_FILE"
     fi
+
+    return 1
 }
 
-load_packaged_runtime_helper
-clear_stale_pid_file
-run_packaged_runtime_prelaunch
-pkill -f "http.server 5175" 2>/dev/null || true
-sleep 0.5
+discover_webview_server_pid() {
+    local proc_cmdline
+    local pid
 
-if [ -d "$WEBVIEW_DIR" ] && [ "$(ls -A "$WEBVIEW_DIR" 2>/dev/null)" ]; then
+    for proc_cmdline in /proc/[0-9]*/cmdline; do
+        [ -e "$proc_cmdline" ] || continue
+        pid="${proc_cmdline#/proc/}"
+        pid="${pid%/cmdline}"
+        if pid_is_webview_server "$pid"; then
+            echo "$pid"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+adopt_existing_webview_server() {
+    local pid
+
+    if pid="$(owned_webview_server_pid)"; then
+        STARTED_WEBVIEW_PID="$pid"
+        return 0
+    fi
+
+    if pid="$(discover_webview_server_pid)"; then
+        STARTED_WEBVIEW_PID="$pid"
+        echo "$pid" > "$WEBVIEW_PID_FILE"
+        echo "Adopted existing webview server pid=$pid dir=$WEBVIEW_DIR"
+        return 0
+    fi
+
+    return 1
+}
+
+ensure_webview_server() {
+    if [ ! -d "$WEBVIEW_DIR" ] || [ ! "$(ls -A "$WEBVIEW_DIR" 2>/dev/null)" ]; then
+        return 0
+    fi
+
+    if adopt_existing_webview_server && verify_webview_origin "http://127.0.0.1:5175/index.html" >/dev/null 2>&1; then
+        echo "Reusing existing verified webview server on :5175"
+        log_phase "webview_reused"
+        return 0
+    fi
+
+    if verify_webview_origin "http://127.0.0.1:5175/index.html" >/dev/null 2>&1; then
+        notify_error "Codex Desktop webview port 5175 is already serving Codex content, but it is not owned by this launcher. Stop the other webview server and try again."
+        exit 1
+    fi
+
+    stop_owned_webview_server
+
     cd "$WEBVIEW_DIR"
-    nohup python3 -m http.server 5175 &
-    HTTP_PID=$!
-    trap "kill $HTTP_PID 2>/dev/null" EXIT
+    python3 -m http.server 5175 --bind 127.0.0.1 &
+    STARTED_WEBVIEW_PID=$!
+    echo "$STARTED_WEBVIEW_PID" > "$WEBVIEW_PID_FILE"
 
-    echo "Started webview server pid=$HTTP_PID dir=$WEBVIEW_DIR"
+    echo "Started webview server pid=$STARTED_WEBVIEW_PID dir=$WEBVIEW_DIR"
 
     if ! wait_for_webview_server; then
         notify_error "Codex Desktop webview server did not become ready on port 5175. Check the launcher log for the embedded http.server output."
         exit 1
     fi
 
-    if ! kill -0 "$HTTP_PID" 2>/dev/null; then
+    if ! kill -0 "$STARTED_WEBVIEW_PID" 2>/dev/null; then
         notify_error "Codex Desktop webview server exited before Electron launch. Another process may already be using port 5175."
         exit 1
     fi
@@ -558,36 +783,123 @@ if [ -d "$WEBVIEW_DIR" ] && [ "$(ls -A "$WEBVIEW_DIR" 2>/dev/null)" ]; then
     fi
 
     echo "Webview origin verified."
+    log_phase "webview_ready"
+}
+
+clear_stale_pid_file() {
+    if [ ! -f "$APP_PID_FILE" ]; then
+        return 0
+    fi
+
+    local pid=""
+    pid="$(cat "$APP_PID_FILE" 2>/dev/null || true)"
+    if [ -z "$pid" ] || ! pid_matches_executable "$pid" "$SCRIPT_DIR/electron"; then
+        rm -f "$APP_PID_FILE"
+    fi
+}
+
+cleanup_launcher() {
+    if [ -n "${ELECTRON_PID:-}" ] && [ -f "$APP_PID_FILE" ]; then
+        local current_pid
+        current_pid="$(cat "$APP_PID_FILE" 2>/dev/null || true)"
+        if [ "$current_pid" = "$ELECTRON_PID" ]; then
+            rm -f "$APP_PID_FILE"
+        fi
+    fi
+
+    if [ -n "${STARTED_WEBVIEW_PID:-}" ] && pid_is_webview_server "$STARTED_WEBVIEW_PID"; then
+        kill "$STARTED_WEBVIEW_PID" 2>/dev/null || true
+        rm -f "$WEBVIEW_PID_FILE"
+    fi
+}
+
+launch_electron() {
+    cd "$SCRIPT_DIR"
+    log_phase "electron_launch"
+
+    if [ "$WARM_START" -eq 1 ]; then
+        "$SCRIPT_DIR/electron" \
+            --no-sandbox \
+            --class=codex-desktop \
+            --app-id=codex-desktop \
+            --ozone-platform-hint=auto \
+            --disable-gpu-sandbox \
+            --disable-gpu-compositing \
+            --enable-features=WaylandWindowDecorations \
+            "$@"
+        return $?
+    fi
+
+    "$SCRIPT_DIR/electron" \
+        --no-sandbox \
+        --class=codex-desktop \
+        --app-id=codex-desktop \
+        --ozone-platform-hint=auto \
+        --disable-gpu-sandbox \
+        --disable-gpu-compositing \
+        --enable-features=WaylandWindowDecorations \
+        "$@" &
+    ELECTRON_PID=$!
+    echo "$ELECTRON_PID" > "$APP_PID_FILE"
+    log_phase "electron_spawned"
+
+    set +e
+    wait "$ELECTRON_PID"
+    local status=$?
+    set -e
+    return "$status"
+}
+
+load_packaged_runtime_helper
+clear_stale_pid_file
+detect_warm_start
+trap cleanup_launcher EXIT
+
+if [ "$WARM_START" -eq 0 ]; then
+    run_packaged_runtime_prelaunch
+    log_phase "packaged_prelaunch"
+    ensure_webview_server
+else
+    echo "Skipping packaged prelaunch and webview setup for warm start"
+    log_phase "warm_start_ready"
 fi
 
-if [ -z "${CODEX_CLI_PATH:-}" ]; then
+if [ "$WARM_START" -eq 0 ] && [ -z "${CODEX_CLI_PATH:-}" ]; then
     CODEX_CLI_PATH="$(find_codex_cli || true)"
     export CODEX_CLI_PATH
+    log_phase "cli_lookup"
 fi
 export CHROME_DESKTOP="${CHROME_DESKTOP:-codex-desktop.desktop}"
 
-if [ -z "$CODEX_CLI_PATH" ]; then
+if [ "$WARM_START" -eq 0 ] && [ -z "$CODEX_CLI_PATH" ]; then
+    if prompt_install_missing_cli; then
+        if ! run_cli_preflight 1; then
+            notify_error "Codex CLI automatic installation failed. Install with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
+            exit 1
+        fi
+    fi
+fi
+
+if [ "$WARM_START" -eq 0 ] && [ -z "$CODEX_CLI_PATH" ]; then
     notify_error "Codex CLI not found. Install with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
     exit 1
 fi
 
-run_cli_preflight
+if [ "$WARM_START" -eq 0 ]; then
+    if [ "${CODEX_SYNC_CLI_PREFLIGHT:-0}" = "1" ]; then
+        run_cli_preflight 0
+        log_phase "cli_preflight_sync"
+    else
+        run_cli_preflight_background
+        log_phase "cli_preflight_backgrounded"
+    fi
+fi
 
 export_packaged_runtime_env
 
-echo "Using CODEX_CLI_PATH=$CODEX_CLI_PATH"
+echo "Using CODEX_CLI_PATH=${CODEX_CLI_PATH:-warm-start-skip}"
 
-cd "$SCRIPT_DIR"
-echo "$$" > "$APP_PID_FILE"
-exec "$SCRIPT_DIR/electron" \
-    --no-sandbox \
-    --class=codex-desktop \
-    --app-id=codex-desktop \
-    --ozone-platform-hint=auto \
-    --disable-gpu-sandbox \
-    --disable-gpu-compositing \
-    --enable-features=WaylandWindowDecorations \
-    "$@"
+launch_electron "$@"
 SCRIPT
 
     chmod +x "$INSTALL_DIR/start.sh"

@@ -175,9 +175,12 @@ test_missing_input_failure() {
     info "Checking missing-input failure path"
     local workspace="$TMP_DIR/missing"
     local bin_dir="$workspace/bin"
+    local rpm_app_dir="$workspace/rpm-app"
+    local rpm_log="$workspace/rpm-missing-runtime.log"
 
     mkdir -p "$workspace"
     make_stub_bin_dir "$bin_dir"
+    make_fake_app "$rpm_app_dir"
     cat > "$bin_dir/dpkg" <<'SCRIPT'
 #!/bin/bash
 echo amd64
@@ -191,19 +194,66 @@ SCRIPT
     if PATH="$bin_dir:$PATH" APP_DIR_OVERRIDE="$workspace/does-not-exist" PKG_ROOT_OVERRIDE="$workspace/deb-root" "$REPO_DIR/scripts/build-deb.sh" >/dev/null 2>&1; then
         fail "build-deb.sh should fail when APP_DIR is missing"
     fi
+
+    if APP_DIR_OVERRIDE="$rpm_app_dir" PACKAGED_RUNTIME_SOURCE="$workspace/does-not-exist.sh" "$REPO_DIR/scripts/build-rpm.sh" >"$rpm_log" 2>&1; then
+        fail "build-rpm.sh should fail when PACKAGED_RUNTIME_SOURCE is missing"
+    fi
+    assert_contains "$rpm_log" "Missing packaged launcher runtime helper"
+}
+
+test_make_build_app_uses_installer_download_flow_by_default() {
+    info "Checking make build-app default DMG behavior"
+    local workspace="$TMP_DIR/make-build-app"
+    local install_log="$workspace/install-args.log"
+
+    mkdir -p "$workspace"
+
+    cat > "$workspace/install.sh" <<'SCRIPT'
+#!/bin/bash
+set -eu
+printf '%s\n' "$#" > "$TEST_INSTALL_LOG"
+if [ "$#" -gt 0 ]; then
+    printf '%s\n' "$1" >> "$TEST_INSTALL_LOG"
+fi
+SCRIPT
+    chmod +x "$workspace/install.sh"
+
+    TEST_INSTALL_LOG="$install_log" make -f "$REPO_DIR/Makefile" -C "$workspace" build-app >/dev/null
+
+    assert_file_exists "$install_log"
+    first_line="$(sed -n '1p' "$install_log")"
+    second_line="$(sed -n '2p' "$install_log")"
+    [ "$first_line" = "1" ] || fail "Expected make build-app to call install.sh with a single default argument slot, got: $(cat "$install_log")"
+    [ -z "$second_line" ] || fail "Expected make build-app default DMG argument to be empty so install.sh falls back to reuse/download, got: $(cat "$install_log")"
 }
 
 test_launcher_template_sanity() {
     info "Checking launcher template markers"
-    assert_contains "$REPO_DIR/install.sh" "nohup python3 -m http.server 5175"
+    assert_contains "$REPO_DIR/install.sh" "python3 -m http.server 5175 --bind 127.0.0.1"
+    assert_contains "$REPO_DIR/install.sh" "WEBVIEW_PID_FILE"
+    assert_contains "$REPO_DIR/install.sh" "owned_webview_server_pid"
+    assert_contains "$REPO_DIR/install.sh" "discover_webview_server_pid"
+    assert_contains "$REPO_DIR/install.sh" "Adopted existing webview server"
+    assert_contains "$REPO_DIR/install.sh" "detect_warm_start"
+    assert_contains "$REPO_DIR/install.sh" "launcher_phase"
+    assert_contains "$REPO_DIR/install.sh" "CODEX_SYNC_CLI_PREFLIGHT"
     assert_contains "$REPO_DIR/install.sh" "wait_for_webview_server"
     assert_contains "$REPO_DIR/install.sh" "verify_webview_origin"
     assert_contains "$REPO_DIR/install.sh" "Webview origin verified."
+    assert_not_contains "$REPO_DIR/install.sh" "pkill -f \"http.server 5175\""
     assert_contains "$REPO_DIR/install.sh" "--app-id=codex-desktop"
     assert_contains "$REPO_DIR/install.sh" "--ozone-platform-hint=auto"
     assert_contains "$REPO_DIR/install.sh" "--disable-gpu-sandbox"
     assert_contains "$REPO_DIR/install.sh" "PACKAGED_RUNTIME_HELPER"
+    assert_contains "$REPO_DIR/install.sh" "prompt_install_missing_cli"
+    assert_contains "$REPO_DIR/install.sh" "Install it now? \\[Y/n\\]"
+    assert_contains "$REPO_DIR/install.sh" "is_interactive_terminal"
     assert_contains "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh" "CHROME_DESKTOP"
+    assert_contains "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh" "codex-update-manager-launch-check"
+    assert_contains "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh" "codex-update-manager check-now --if-stale"
+    assert_not_contains "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh" "restart codex-update-manager.service"
+    assert_contains "$REPO_DIR/scripts/build-rpm.sh" "stage_common_package_files"
+    assert_contains "$REPO_DIR/scripts/build-rpm.sh" "PACKAGED_RUNTIME_SOURCE"
     assert_contains "$REPO_DIR/packaging/linux/codex-desktop.desktop" "BAMF_DESKTOP_FILE_HINT"
 }
 
@@ -271,6 +321,94 @@ test_linux_translucent_sidebar_default_patch_smoke() {
     assert_occurrence_count "$extracted/webview/assets/index-test.js" 'dataset.codexOs===`linux`' '1'
 }
 
+test_linux_tray_patch_smoke() {
+    info "Checking Linux tray patch behavior"
+    local workspace="$TMP_DIR/tray-patch"
+    local extracted="$workspace/extracted"
+    local output_log="$workspace/output.log"
+    local bundle_body
+
+    mkdir -p "$workspace"
+    bundle_body="$(cat <<'JS'
+let D={removeMenu(){},setMenuBarVisibility(){},setIcon(){},once(){}};
+let t={join(){},C:{Prod:`prod`},A(){}};
+let a={existsSync(){return true},statSync(){return {isFile(){return false}}}};
+let n={app:{isPackaged:true,getFileIcon(){},quit(){}},Menu:{buildFromTemplate(){return {once(){}}}},nativeImage:{createFromPath(){return {isEmpty(){return false}}}},shell:{openPath(){return ""},showItemInFolder(){}},Tray:function(){}};
+let i={join(){}};
+let k={hide(){},isDestroyed(){return false}};
+let f=`local`;
+...process.platform===`win32`?{autoHideMenuBar:!0}:{},process.platform===`win32`&&D.removeMenu(),foo)}),D.once(`ready-to-show`,()=>{
+var sa=Mi({id:`fileManager`,label:`Finder`,icon:`apps/finder.png`,kind:`fileManager`,darwin:{detect:()=>`open`,args:e=>ai(e)},win32:{label:`File Explorer`,icon:`apps/file-explorer.png`,detect:ca,args:e=>ai(e),open:async({path:e})=>la(e)}});
+function ca(){let e=1;return e}
+async function la(e){let t=ua(e);if(t&&(0,a.statSync)(t).isFile()){n.shell.showItemInFolder(t);return}let r=t??e,i=await n.shell.openPath(r);if(i)throw Error(i)}
+function ua(e){return e}
+var Ua=Mi({id:`systemDefault`,label:`System Default App`,icon:`apps/file-explorer.png`,kind:`systemDefault`,hidden:!0,darwin:{icon:`apps/finder.png`,detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)},win32:{detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)},linux:{detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)}});
+async function Wa(e){return e}
+function Nw(e,n){return `icon`}
+async function Hw(e){return process.platform!==`win32`&&process.platform!==`darwin`?null:(zw=!0,Lw??Rw??(Rw=(async()=>{let r=await Ww(e.buildFlavor,e.repoRoot),i=new n.Tray(r.defaultIcon);return i})()))}
+async function Ww(e,t){if(process.platform===`darwin`){return null}let r=process.platform===`win32`?`.ico`:`.png`,a=Nw(e,process.platform),o=[...n.app.isPackaged?[(0,i.join)(process.resourcesPath,`${a}${r}`)]:[],(0,i.join)(t,`electron`,`src`,`icons`,`${a}${r}`)];for(let e of o){let t=n.nativeImage.createFromPath(e);if(!t.isEmpty())return{defaultIcon:t,chronicleRunningIcon:null}}return{defaultIcon:await n.app.getFileIcon(process.execPath,{size:process.platform===`win32`?`small`:`normal`}),chronicleRunningIcon:null}}
+var pb=class{trayMenuThreads={runningThreads:[],unreadThreads:[],pinnedThreads:[],recentThreads:[],usageLimits:[]};constructor(){this.tray={on(){},setContextMenu(){},popUpContextMenu(){}};this.onTrayButtonClick=()=>{};this.tray.on(`click`,()=>{this.onTrayButtonClick()}),this.tray.on(`right-click`,()=>{this.openNativeTrayMenu()})}async handleMessage(e){switch(e.type){case`tray-menu-threads-changed`:this.trayMenuThreads=e.trayMenuThreads;return}}openNativeTrayMenu(){this.updateChronicleTrayIcon();let e=n.Menu.buildFromTemplate(this.getNativeTrayMenuItems());e.once(`menu-will-show`,()=>{this.isNativeTrayMenuOpen=!0}),e.once(`menu-will-close`,()=>{this.isNativeTrayMenuOpen=!1,this.handleNativeTrayMenuClosed()}),this.tray.popUpContextMenu(e)}updateChronicleTrayIcon(){}getNativeTrayMenuItems(){return[]}}
+v&&k.on(`close`,e=>{this.persistPrimaryWindowBounds(k,f);let t=this.getPrimaryWindows(f).some(e=>e!==k);if(process.platform===`win32`&&f===`local`&&!this.isAppQuitting&&this.options.canHideLastLocalWindowToTray?.()===!0&&!t){e.preventDefault(),k.hide();return}if(process.platform===`darwin`&&!this.isAppQuitting&&!t){e.preventDefault(),k.hide()}});
+let E=process.platform===`win32`;
+let oe=async()=>{};
+let se=async e=>{};
+E&&oe();let ce=Hr({});
+JS
+)"
+    make_fake_extracted_asar "$extracted" "$bundle_body"
+
+    node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
+    assert_contains "$extracted/.vite/build/main-test.js" 'process.platform!==`win32`&&process.platform!==`darwin`&&process.platform!==`linux`?null:'
+    assert_contains "$extracted/.vite/build/main-test.js" 'nativeImage.createFromPath(process.resourcesPath+`/../content/webview/assets/app-test.png`)'
+    assert_contains "$extracted/.vite/build/main-test.js" '(process.platform===`win32`||process.platform===`linux`)&&f===`local`'
+    assert_contains "$extracted/.vite/build/main-test.js" 'setLinuxTrayContextMenu(){let e=n.Menu.buildFromTemplate(this.getNativeTrayMenuItems())'
+    assert_contains "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&this.setLinuxTrayContextMenu(),this.tray.on(`click`'
+    assert_contains "$extracted/.vite/build/main-test.js" 'process.platform===`linux`?this.openNativeTrayMenu():this.onTrayButtonClick()'
+    assert_contains "$extracted/.vite/build/main-test.js" 'let e=process.platform===`linux`&&this.setLinuxTrayContextMenu?this.setLinuxTrayContextMenu():n.Menu.buildFromTemplate'
+    assert_contains "$extracted/.vite/build/main-test.js" 'if(process.platform===`linux`)return;e.once(`menu-will-show`'
+    assert_contains "$extracted/.vite/build/main-test.js" 'this.trayMenuThreads=e.trayMenuThreads,process.platform===`linux`&&this.setLinuxTrayContextMenu?.()'
+    assert_contains "$extracted/.vite/build/main-test.js" '(E||process.platform===`linux`)&&oe();'
+    assert_not_contains "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&this.tray.setContextMenu?.(e),this.tray.popUpContextMenu(e)'
+    assert_not_contains "$output_log" 'WARN: Could not find tray'
+
+    node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'process.platform!==`linux`' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'nativeImage.createFromPath(process.resourcesPath' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'process.platform===`linux`)&&f===`local`' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'setLinuxTrayContextMenu(){' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&this.setLinuxTrayContextMenu(),this.tray.on(`click`' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'process.platform===`linux`?this.openNativeTrayMenu():this.onTrayButtonClick()' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'let e=process.platform===`linux`&&this.setLinuxTrayContextMenu?this.setLinuxTrayContextMenu():n.Menu.buildFromTemplate' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'if(process.platform===`linux`)return;e.once(`menu-will-show`' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&this.setLinuxTrayContextMenu?.()' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'process.platform===`linux`)&&oe' '1'
+}
+
+test_linux_single_instance_patch_smoke() {
+    info "Checking Linux single-instance patch behavior"
+    local workspace="$TMP_DIR/single-instance-patch"
+    local extracted="$workspace/extracted"
+    local output_log="$workspace/output.log"
+    local bundle_body
+
+    mkdir -p "$workspace"
+    bundle_body="$(cat <<'JS'
+let n={app:{whenReady(){},quit(){},requestSingleInstanceLock(){},on(){},off(){}}};
+let t={Er(){return {info(){}}},jn:class{add(){}}};
+async function uT(){let k=new t.jn;t.Er().info(`Launching app`,{safe:{agentRunId:process.env.CODEX_ELECTRON_AGENT_RUN_ID?.trim()||null}});let A=Date.now();await n.app.whenReady();let R={deepLinks:{queueProcessArgs(){return false}}},P={hotkeyWindowLifecycleManager:{hide(){}},getPrimaryWindow(){return null},createFreshLocalWindow(){return null}},g={reportNonFatal(){}},l=()=>{},re=e=>{e.isMinimized()&&e.restore(),e.show(),e.focus()},ie=async()=>{try{P.hotkeyWindowLifecycleManager.hide();let e=P.getPrimaryWindow(`local`)??await P.createFreshLocalWindow(`/`);if(e==null)return;re(e)}catch(e){g.reportNonFatal(e instanceof Error?e:`Failed to open window on second instance`,{kind:`second-instance-open-window-failed`})}};l(e=>{R.deepLinks.queueProcessArgs(e)||ie()});let ae=async()=>{}}
+JS
+)"
+    make_fake_extracted_asar "$extracted" "$bundle_body"
+
+    node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
+    assert_contains "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&!n.app.requestSingleInstanceLock()'
+    assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxSecondInstanceHandler'
+
+    node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" '!n.app.requestSingleInstanceLock()' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'codexLinuxSecondInstanceHandler' '3'
+}
+
 test_linux_file_manager_patch_fails_soft() {
     info "Checking Linux file manager patch fallback"
     local workspace="$TMP_DIR/file-manager-patch-fallback"
@@ -289,9 +427,12 @@ main() {
     test_deb_builder_smoke
     test_rpm_builder_smoke
     test_missing_input_failure
+    test_make_build_app_uses_installer_download_flow_by_default
     test_launcher_template_sanity
     test_linux_file_manager_patch_smoke
     test_linux_translucent_sidebar_default_patch_smoke
+    test_linux_tray_patch_smoke
+    test_linux_single_instance_patch_smoke
     test_linux_file_manager_patch_fails_soft
     info "All script smoke tests passed"
 }

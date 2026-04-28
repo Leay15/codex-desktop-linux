@@ -1,7 +1,6 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-DEFAULT_DMG := $(CURDIR)/Codex.dmg
 APP_DIR := $(CURDIR)/codex-app
 PACKAGE_NAME := codex-desktop
 DEB_GLOB := $(CURDIR)/dist/$(PACKAGE_NAME)_*.deb
@@ -20,7 +19,7 @@ help:
 	@printf '  %-18s %s\n' "make build-app" "Run install.sh and regenerate codex-app/"
 	@printf '  %-18s %s\n' "make run-app" "Launch the local generated Electron app from codex-app/"
 	@printf '  %-18s %s\n' "make deb" "Build the Debian package into dist/"
-	@printf '  %-18s %s\n' "make rpm" "Build the RPM package into dist/ (Fedora)"
+	@printf '  %-18s %s\n' "make rpm" "Build the RPM package into dist/ (Fedora/openSUSE)"
 	@printf '  %-18s %s\n' "make pacman" "Build the pacman package into dist/ (Arch)"
 	@printf '  %-18s %s\n' "make package" "Build native package (auto-detects deb, rpm, or pacman)"
 	@printf '  %-18s %s\n' "make install" "Install the latest generated native package"
@@ -29,7 +28,7 @@ help:
 	@printf '  %-18s %s\n' "make clean-dist" "Remove generated dist/ artifacts"
 	@printf '  %-18s %s\n' "make clean-state" "Remove updater runtime state from XDG directories"
 	@printf '\nVariables:\n\n'
-	@printf '  %-18s %s\n' "DMG=/path/file.dmg" "Override the DMG passed to install.sh (default: $(DEFAULT_DMG))"
+	@printf '  %-18s %s\n' "DMG=/path/file.dmg" "Override the DMG passed to install.sh (default: let install.sh reuse/download Codex.dmg)"
 	@printf '  %-18s %s\n' "PACKAGE_VERSION=..." "Override the package version for make deb / make rpm / make pacman"
 	@printf '  %-18s %s\n' "DEB=/path/file.deb" "Override the .deb used by make install"
 	@printf '  %-18s %s\n' "RPM=/path/file.rpm" "Override the .rpm used by make install"
@@ -57,7 +56,7 @@ build-updater:
 
 build-app:
 	@echo "[make] Regenerating codex-app from DMG"
-	./install.sh "$(or $(DMG),$(DEFAULT_DMG))"
+	./install.sh "$(DMG)"
 
 run-app:
 	@echo "[make] Launching local Electron app"
@@ -104,6 +103,13 @@ install:
 		fi; \
 		echo "[make] Installing $$deb"; \
 		sudo dpkg -i "$$deb"; \
+	elif command -v zypper >/dev/null 2>&1; then \
+		rpm="$${RPM:-$$(ls -1 $(RPM_GLOB) 2>/dev/null | sort -V | tail -n 1)}"; \
+		if [ -z "$$rpm" ]; then \
+			echo "[make] No RPM package found. Run 'make rpm' first." >&2; exit 1; \
+		fi; \
+		echo "[make] Installing $$rpm"; \
+		sudo zypper --non-interactive --no-gpg-checks install -y "$$rpm"; \
 	elif command -v rpm >/dev/null 2>&1; then \
 		rpm="$${RPM:-$$(ls -1 $(RPM_GLOB) 2>/dev/null | sort -V | tail -n 1)}"; \
 		if [ -z "$$rpm" ]; then \
@@ -112,7 +118,7 @@ install:
 		echo "[make] Installing $$rpm"; \
 		sudo rpm -Uvh "$$rpm"; \
 	else \
-		echo "[make] No supported package manager found (dpkg, rpm, or pacman)." >&2; exit 1; \
+		echo "[make] No supported package manager found (dpkg, rpm, zypper, or pacman)." >&2; exit 1; \
 	fi
 
 service-enable:

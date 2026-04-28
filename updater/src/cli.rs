@@ -15,7 +15,10 @@ pub struct Cli {
 /// Top-level commands supported by the updater binary.
 pub enum Commands {
     Daemon,
-    CheckNow,
+    CheckNow {
+        #[arg(long, default_value_t = false)]
+        if_stale: bool,
+    },
     CliPreflight {
         #[arg(long)]
         cli_path: Option<PathBuf>,

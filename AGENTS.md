@@ -79,7 +79,7 @@ Do not assume `codex-app/` is pristine. If behavior differs from `install.sh`, p
 - Launcher and `nvm`:
   GUI launchers often do not inherit the user's shell `PATH`. The generated `start.sh` explicitly searches for `codex`, including common `nvm` locations.
 - CLI preflight:
-  Before Electron launches, the generated launcher asks `codex-update-manager` to verify the installed Codex CLI and update it if the npm package is newer. The check is best-effort: it uses a 1-hour cooldown for npm registry lookups, falls back to `npm install -g --prefix ~/.local` if a global install fails, and warns instead of blocking app launch when the refresh attempt does not succeed.
+  Before Electron launches, the generated launcher asks `codex-update-manager` to verify the installed Codex CLI, install it automatically if it is missing, and update it if the npm package is newer. The check is best-effort: it uses a 1-hour cooldown for npm registry lookups, falls back to `npm install -g --prefix ~/.local` if a global install fails, and warns instead of blocking app launch when the refresh attempt does not succeed.
 - Linux file manager integration:
   During ASAR patching, `scripts/patch-linux-window-ui.js` also tries to inject a Linux implementation for `Open in File Manager`. The patch is intentionally fail-soft: if the upstream minified bundle no longer matches, the install continues and emits exactly `Failed to apply Linux File Manager Patch`.
 - Linux translucent sidebar default:
@@ -112,7 +112,7 @@ Do not assume `codex-app/` is pristine. If behavior differs from `install.sh`, p
 
 ## Crate Versioning
 
-- Current updater crate version: `0.4.0`
+- Current updater crate version: `0.4.2`
 - Bump `patch` for fixes, docs, and maintenance-only updates.
 - Bump `minor` for compatible feature additions.
 - Bump `major` for incompatible CLI, persisted-state, or install-flow changes.
@@ -191,7 +191,7 @@ PACKAGE_VERSION=2026.03.24.120000+deadbeef ./scripts/build-pacman.sh
 - `node`, `npm`, `npx`, `python3`, `7z`, `curl`, `unzip`, `make`, and `g++` are required for `install.sh`
 - Node.js 20+ is required
 - the packaged app still requires the Codex CLI at runtime:
-  `codex` must exist in `PATH` or be set through `CODEX_CLI_PATH`
+  `codex` must exist in `PATH` or be set through `CODEX_CLI_PATH`, but the launcher now attempts a best-effort automatic install on first run when the CLI is missing and `npm` is available
 
 ## Packaging Notes
 

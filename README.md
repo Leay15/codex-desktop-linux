@@ -4,7 +4,7 @@ Run [OpenAI Codex Desktop](https://openai.com/codex/) on Linux.
 
 The official Codex Desktop app is macOS-only. This project converts the upstream macOS `Codex.dmg` into a runnable Linux Electron app, packages it as `.deb`, `.rpm`, or pacman artifacts, and includes a local updater that rebuilds future Linux packages from newer upstream DMGs.
 
-`codex-update-manager` current crate version: `0.4.1`
+`codex-update-manager` current crate version: `0.4.2`
 
 SemVer policy for the crate:
 
@@ -55,10 +55,18 @@ The easiest setup path is:
 
 ```bash
 bash scripts/install-deps.sh
-npm i -g @openai/codex
 ```
 
 That helper detects `apt`, `dnf5`, `dnf`, or `pacman`, installs system packages, and bootstraps Rust through `rustup` if needed.
+The generated launcher can then auto-install `@openai/codex` on first run if the CLI is still missing and `npm` is available.
+
+If you prefer to preinstall the CLI manually:
+
+```bash
+npm i -g @openai/codex
+```
+
+That helper detects `apt`, `dnf5`, `dnf`, `pacman`, or `zypper`, installs system packages, and bootstraps Rust through `rustup` if needed.
 
 If your system does not allow global npm installs, a rootless alternative also works:
 
@@ -93,7 +101,26 @@ The easiest way to install the required system packages is:
 bash scripts/install-deps.sh
 ```
 
-That helper detects `apt`, `dnf5`, `dnf`, or `pacman`, installs the system dependencies, and bootstraps Rust through `rustup` if needed.
+That helper detects `apt`, `dnf5`, `dnf`, `pacman`, or `zypper`, installs the system dependencies, and bootstraps Rust through `rustup` if needed.
+
+### openSUSE
+
+```bash
+bash scripts/install-deps.sh
+```
+
+Or manually:
+
+```bash
+sudo zypper install nodejs-default npm-default python3 p7zip-full curl unzip
+sudo zypper install -t pattern devel_basis
+```
+
+You also need the **Rust toolchain** for the updater crate:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
 ### Arch Linux
 
@@ -143,12 +170,18 @@ Clone the repo, generate the local app, and run it:
 git clone https://github.com/ilysenko/codex-desktop-linux.git
 cd codex-desktop-linux
 bash scripts/install-deps.sh
-npm i -g @openai/codex
 make build-app
 make run-app
 ```
 
-If `npm i -g` needs elevated privileges on your system, replace it with:
+The first launch can auto-install the Codex CLI if it is still missing.
+If you prefer to preinstall it yourself, use:
+
+```bash
+npm i -g @openai/codex
+```
+
+If global npm installs need elevated privileges on your system, replace that with:
 
 ```bash
 npm i -g --prefix ~/.local @openai/codex
@@ -230,7 +263,7 @@ Output:
 dist/codex-desktop_YYYY.MM.DD.HHMMSS_amd64.deb
 ```
 
-### RPM
+### RPM (Fedora / openSUSE)
 
 Requires `codex-app/` to exist (run `make build-app` first).
 
@@ -339,16 +372,18 @@ The build and update flow is:
 The package installs a companion service named `codex-update-manager`.
 
 - It runs as a `systemd --user` service.
-- The launcher starts it in best-effort mode on first app launch.
-- It checks the upstream `Codex.dmg` on startup and every 6 hours.
+- The launcher starts it in best-effort mode on app launch.
+- Each app launch also triggers a background `check-now --if-stale`; the updater skips that request when the last successful upstream check is still fresh or another check, rebuild, or install is already active.
+- It checks the upstream `Codex.dmg` on daemon startup and every 6 hours.
 - When a new DMG is detected, it rebuilds a local native package using `/opt/codex-desktop/update-builder`.
 - If the app is open, the update waits until Electron exits.
 - When the app is closed, the updater uses `pkexec` only for the final native-package install step.
 - On Arch, that final install step is `pacman -U --noconfirm` against the locally rebuilt `.pkg.tar.zst`, not `git pull`.
+- On openSUSE, that final install step is `zypper --non-interactive --no-gpg-checks install` against the locally rebuilt `.rpm` (the package is unsigned because it is built locally).
 - If a privileged install fails or is dismissed, the updater stays in `failed` instead of re-prompting every 15 seconds.
 - If an `Installing` state is interrupted by a crash or restart, the updater now recovers that state automatically instead of getting stuck and skipping all future upstream checks.
-- Before Electron launches, the launcher asks the updater to verify the installed Codex CLI and update it if the npm package is newer.
-- That CLI preflight is best-effort: it uses a 1-hour cooldown for registry checks, falls back to `npm install -g --prefix ~/.local` if a global install fails, and warns instead of aborting app launch when the automatic refresh does not succeed.
+- Before Electron launches, the launcher only resolves a usable Codex CLI path. If the CLI is missing and the launcher was started from an interactive terminal, it prompts before attempting an automatic install. The updater CLI preflight then runs in the background by default so npm registry checks and follow-up updates do not block the first window.
+- That CLI preflight is best-effort: it uses a 1-hour cooldown for registry checks, falls back to `npm install -g --prefix ~/.local` if a global install fails, and keeps the app launch on the current CLI when the automatic refresh does not succeed. Set `CODEX_SYNC_CLI_PREFLIGHT=1` to restore the old synchronous preflight behavior for debugging.
 
 Inspect the live service and runtime files with:
 
@@ -383,10 +418,10 @@ The macOS Codex app is an Electron application. The core code (`app.asar`) is pl
 
 The installer replaces the macOS Electron with a Linux build and recompiles the native modules using `@electron/rebuild`. The `sparkle` module is removed because it is macOS-only.
 
-The extracted app expects a local webview origin on `localhost:5175`, so the launcher starts `python3 -m http.server 5175` from `content/webview/`, waits for the socket to become reachable, and only then launches Electron.
-The launcher now also verifies that `http://127.0.0.1:5175/index.html` contains the expected Codex startup markers before Electron launches, so a port collision or incomplete extracted webview fails fast in `launcher.log` instead of hanging on the splash screen.
+The extracted app expects a local webview origin on `127.0.0.1:5175`, so the launcher starts `python3 -m http.server 5175 --bind 127.0.0.1` from `content/webview/`, waits for the socket to become reachable, and only then launches Electron. The launcher tracks the owned webview server PID under XDG state, rediscovers an orphaned server from the same `content/webview/` directory, and reuses an already verified server instead of killing every process that matches the port.
+The launcher also verifies that `http://127.0.0.1:5175/index.html` contains the expected Codex startup markers before cold-starting Electron, so a port collision or incomplete extracted webview fails fast in `launcher.log` instead of hanging on the splash screen. If an existing Electron process is detected, the launcher uses a warm-start handoff path and lets the app's single-instance handler focus the running window.
 
-Native-package-only launcher behavior such as desktop-entry hints and `codex-update-manager` session bootstrapping lives in `packaging/linux/codex-packaged-runtime.sh`, which the generated launcher loads only when present inside a packaged install.
+Native-package-only launcher behavior such as desktop-entry hints, `codex-update-manager` session bootstrapping, and the background launch-time update check lives in `packaging/linux/codex-packaged-runtime.sh`, which the generated launcher loads only when present inside a packaged install.
 
 The current evaluation for a future Rust replacement for the local webview server lives in `docs/webview-server-evaluation.md`.
 

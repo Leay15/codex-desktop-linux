@@ -3,6 +3,18 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.2] - 2026-04-23
+
+### Changed
+
+- `make build-app` now defers to `install.sh` when no `DMG=...` override is provided, so fresh checkouts can reuse or download `Codex.dmg` through the installer's normal flow instead of failing on a missing local cache path.
+- Launcher CLI preflight now uses `install.sh` to decide when missing-CLI installation is allowed, instead of always enabling the updater's auto-install path up front.
+
+### Fixed
+
+- `codex-update-manager` now refreshes CLI status when the daemon starts and shows a desktop notification if the Codex CLI is missing, so package installs do not rely on the user manually checking updater state to understand why Codex Desktop cannot launch cleanly.
+- When the Codex CLI is missing and the launcher starts from an interactive terminal, it now prompts before attempting installation instead of requiring the missing-CLI install behavior to be forced implicitly.
+
 ## [0.4.1] - 2026-04-19
 
 ### Added

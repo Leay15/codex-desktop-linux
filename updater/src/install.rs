@@ -15,6 +15,7 @@ const DPKG_CANDIDATES: &[&str] = &["/usr/bin/dpkg", "/bin/dpkg"];
 const DPKG_DEB_CANDIDATES: &[&str] = &["/usr/bin/dpkg-deb", "/bin/dpkg-deb"];
 const DPKG_QUERY_CANDIDATES: &[&str] = &["/usr/bin/dpkg-query", "/bin/dpkg-query"];
 const RPM_CANDIDATES: &[&str] = &["/usr/bin/rpm", "/bin/rpm"];
+const ZYPPER_CANDIDATES: &[&str] = &["/usr/bin/zypper", "/bin/zypper"];
 const PACMAN_CANDIDATES: &[&str] = &["/usr/bin/pacman", "/bin/pacman"];
 const VERCMP_CANDIDATES: &[&str] = &["/usr/bin/vercmp", "/bin/vercmp"];
 const PACMAN_PACKAGE_SUFFIXES: &[&str] = &[
@@ -228,6 +229,12 @@ pub fn install_rpm(path: &Path) -> Result<()> {
         return Ok(());
     }
 
+    if program_exists(ZYPPER_CANDIDATES, "zypper") {
+        let mut command = zypper_install_command(path)?;
+        run_install(&mut command).context("zypper install failed")?;
+        return Ok(());
+    }
+
     let mut command = rpm_install_command(path);
     run_install(&mut command).context("rpm -Uvh failed")
 }
@@ -344,6 +351,25 @@ fn dpkg_install_command(path: &Path) -> Command {
 
 fn dnf_install_command(path: &Path) -> Result<Command> {
     install_command_in_parent(&program_path(DNF_CANDIDATES, "dnf"), path)
+}
+
+fn zypper_install_command(path: &Path) -> Result<Command> {
+    let program = program_path(ZYPPER_CANDIDATES, "zypper");
+    let parent = path
+        .parent()
+        .with_context(|| "zypper package path has no parent directory")?;
+    let file_name = path
+        .file_name()
+        .with_context(|| "zypper package path has no file name")?
+        .to_string_lossy()
+        .into_owned();
+
+    let mut command = Command::new(program);
+    command
+        .current_dir(parent)
+        .args(["--non-interactive", "--no-gpg-checks", "install", "-y"])
+        .arg(format!("./{file_name}"));
+    Ok(command)
 }
 
 fn install_command_in_parent(program: &Path, path: &Path) -> Result<Command> {
@@ -590,6 +616,26 @@ mod tests {
     }
 
     #[test]
+    fn builds_local_zypper_install_command() -> Result<()> {
+        let command = zypper_install_command(Path::new("/tmp/build/codex.rpm"))?;
+        assert!(command.get_program().to_string_lossy().ends_with("zypper"));
+        assert_eq!(
+            command
+                .get_args()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                "--non-interactive",
+                "--no-gpg-checks",
+                "install",
+                "-y",
+                "./codex.rpm"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn package_kind_from_path_detects_rpm() {
         assert_eq!(
             PackageKind::from_path(Path::new("/tmp/codex.rpm")),
@@ -743,9 +789,12 @@ mod tests {
     fn install_commands_require_a_file_name() {
         let deb_error = apt_install_command(Path::new("/")).expect_err("root is not a package");
         let rpm_error = dnf_install_command(Path::new("/")).expect_err("root is not a package");
+        let zypper_error =
+            zypper_install_command(Path::new("/")).expect_err("root is not a package");
 
         assert!(deb_error.to_string().contains("apt package path has no"));
         assert!(rpm_error.to_string().contains("dnf package path has no"));
+        assert!(zypper_error.to_string().contains("zypper package path has no"));
     }
 
     #[test]

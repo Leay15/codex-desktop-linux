@@ -10,13 +10,19 @@ use crate::{
     upstream,
 };
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
+use fs4::fs_std::FileExt;
 use reqwest::Client;
-use std::path::Path;
+use std::{
+    fs::{self, OpenOptions},
+    io::{Seek, SeekFrom, Write},
+    path::Path,
+};
 use tokio::time::{self, Duration};
 use tracing::{error, info, warn};
 
 const RECONCILE_INTERVAL_SECONDS: u64 = 15;
+const CLI_MISSING_NOTIFICATION_EVENT: &str = "cli_missing";
 
 /// Runs the updater command-line entrypoint.
 pub async fn run(cli: Cli) -> Result<()> {
@@ -32,7 +38,9 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Commands::Daemon => run_daemon(&config, &mut state, &paths).await,
-        Commands::CheckNow => run_check_now(&config, &mut state, &paths).await,
+        Commands::CheckNow { if_stale } => {
+            run_check_now(&config, &mut state, &paths, if_stale).await
+        }
         Commands::CliPreflight {
             cli_path,
             print_path,
@@ -105,6 +113,48 @@ fn summarize_command_output(output: &[u8]) -> Option<String> {
     Some(lines.join(" | "))
 }
 
+struct CheckLock {
+    _file: fs::File,
+}
+
+fn try_acquire_check_lock(paths: &RuntimePaths) -> Result<Option<CheckLock>> {
+    let lock_path = paths.state_dir.join("check.lock");
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("Failed to open {}", lock_path.display()))?;
+
+    match file.try_lock_exclusive() {
+        Ok(true) => {}
+        Ok(false) => {
+            info!("skipping upstream check because another check is already active");
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("Failed to lock {}", lock_path.display()));
+        }
+    }
+
+    file.set_len(0)
+        .with_context(|| format!("Failed to truncate {}", lock_path.display()))?;
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("Failed to seek {}", lock_path.display()))?;
+    writeln!(file, "{}", std::process::id())
+        .with_context(|| format!("Failed to write {}", lock_path.display()))?;
+
+    Ok(Some(CheckLock { _file: file }))
+}
+
+fn update_install_is_pending(status: &UpdateStatus) -> bool {
+    matches!(
+        status,
+        UpdateStatus::ReadyToInstall | UpdateStatus::WaitingForAppExit | UpdateStatus::Installing
+    )
+}
+
 async fn run_daemon(
     config: &RuntimeConfig,
     state: &mut PersistedState,
@@ -112,6 +162,8 @@ async fn run_daemon(
 ) -> Result<()> {
     sync_and_persist(config, state, paths)?;
     recover_interrupted_install(state, paths)?;
+    codex_cli::refresh_status(state, paths)?;
+    maybe_notify_cli_missing(state, paths, config.notifications)?;
     maybe_notify_installed(state, paths, config.notifications)?;
     if packaged_runtime_removed(config) {
         info!("packaged app files are gone; stopping updater daemon");
@@ -164,12 +216,28 @@ async fn run_check_now(
     config: &RuntimeConfig,
     state: &mut PersistedState,
     paths: &RuntimePaths,
+    if_stale: bool,
 ) -> Result<()> {
     sync_and_persist(config, state, paths)?;
     recover_interrupted_install(state, paths)?;
+    codex_cli::refresh_status(state, paths)?;
+    maybe_notify_cli_missing(state, paths, config.notifications)?;
     maybe_notify_installed(state, paths, config.notifications)?;
+    if if_stale && upstream_check_is_fresh(config, state) {
+        info!("skipping check-now because the last successful upstream check is still fresh");
+        return reconcile_pending_install(config, state, paths).await;
+    }
     run_check_cycle(config, state, paths).await?;
     reconcile_pending_install(config, state, paths).await
+}
+
+fn upstream_check_is_fresh(config: &RuntimeConfig, state: &PersistedState) -> bool {
+    let Some(last_successful_check_at) = state.last_successful_check_at else {
+        return false;
+    };
+
+    let freshness_window = ChronoDuration::hours(config.check_interval_hours as i64);
+    Utc::now().signed_duration_since(last_successful_check_at) < freshness_window
 }
 
 fn run_status(state: &mut PersistedState, paths: &RuntimePaths, json: bool) -> Result<()> {
@@ -223,13 +291,14 @@ async fn run_check_cycle(
 ) -> Result<()> {
     let retrying_failed_update = state.status == UpdateStatus::Failed;
 
-    if matches!(
-        state.status,
-        UpdateStatus::ReadyToInstall | UpdateStatus::WaitingForAppExit | UpdateStatus::Installing
-    ) {
+    if update_install_is_pending(&state.status) {
         info!("skipping upstream check because an update is already pending");
         return Ok(());
     }
+
+    let Some(_check_lock) = try_acquire_check_lock(paths)? else {
+        return Ok(());
+    };
 
     let client = Client::builder().build()?;
 
@@ -429,10 +498,14 @@ fn compare_generated_versions(left: &str, right: &str) -> Option<std::cmp::Order
 }
 
 fn parse_generated_version(version: &str) -> Option<Vec<u32>> {
-    let base = version
+    let without_metadata = version
         .split_once('+')
         .map(|(prefix, _)| prefix)
         .unwrap_or(version);
+    let base = without_metadata
+        .split_once('-')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(without_metadata);
     let mut parts = Vec::new();
     for segment in base.split('.') {
         parts.push(segment.parse::<u32>().ok()?);
@@ -456,7 +529,18 @@ fn maybe_notify(
         .as_deref()
         .unwrap_or(&state.installed_version);
     let event_key = format!("{event_name}:{version}");
-    if !state.notified_events.insert(event_key) {
+    maybe_notify_with_event_key(state, paths, enabled, &event_key, summary, body)
+}
+
+fn maybe_notify_with_event_key(
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    enabled: bool,
+    event_key: &str,
+    summary: &str,
+    body: &str,
+) -> Result<()> {
+    if !state.notified_events.insert(event_key.to_string()) {
         return Ok(());
     }
 
@@ -468,6 +552,41 @@ fn maybe_notify(
 
     persist_state(paths, state)?;
     Ok(())
+}
+
+fn clear_notification_event(
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    event_key: &str,
+) -> Result<()> {
+    if state.notified_events.remove(event_key) {
+        persist_state(paths, state)?;
+    }
+
+    Ok(())
+}
+
+fn cli_is_missing(state: &PersistedState) -> bool {
+    state.cli_path.is_none() && state.cli_installed_version.is_none()
+}
+
+fn maybe_notify_cli_missing(
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    enabled: bool,
+) -> Result<()> {
+    if !cli_is_missing(state) {
+        return clear_notification_event(state, paths, CLI_MISSING_NOTIFICATION_EVENT);
+    }
+
+    maybe_notify_with_event_key(
+        state,
+        paths,
+        enabled,
+        CLI_MISSING_NOTIFICATION_EVENT,
+        "Codex CLI not installed",
+        "Codex Desktop needs the Codex CLI. Install it with npm or open the app to retry the automatic install flow.",
+    )
 }
 
 fn maybe_notify_installed(
@@ -565,6 +684,29 @@ fn notify_failure(
 mod tests {
     use super::*;
 
+    #[test]
+    fn upstream_check_freshness_respects_configured_interval() {
+        let config = RuntimeConfig {
+            dmg_url: "https://example.com/Codex.dmg".to_string(),
+            initial_check_delay_seconds: 1,
+            check_interval_hours: 6,
+            auto_install_on_app_exit: true,
+            notifications: false,
+            workspace_root: std::path::PathBuf::from("/tmp/cache"),
+            builder_bundle_root: std::path::PathBuf::from("/tmp/builder"),
+            app_executable_path: std::path::PathBuf::from("/tmp/electron"),
+        };
+
+        let mut state = PersistedState::new(true);
+        assert!(!upstream_check_is_fresh(&config, &state));
+
+        state.last_successful_check_at = Some(Utc::now() - ChronoDuration::hours(1));
+        assert!(upstream_check_is_fresh(&config, &state));
+
+        state.last_successful_check_at = Some(Utc::now() - ChronoDuration::hours(7));
+        assert!(!upstream_check_is_fresh(&config, &state));
+    }
+
     #[tokio::test]
     async fn failed_state_with_existing_deb_stays_failed() -> Result<()> {
         let temp = tempfile::tempdir()?;
@@ -634,13 +776,71 @@ mod tests {
             app_executable_path: temp.path().join("not-running-electron"),
         };
 
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::ReadyToInstall;
+        for status in [
+            UpdateStatus::ReadyToInstall,
+            UpdateStatus::WaitingForAppExit,
+            UpdateStatus::Installing,
+        ] {
+            let mut state = PersistedState::new(true);
+            state.status = status.clone();
 
-        run_check_cycle(&config, &mut state, &paths).await?;
+            run_check_cycle(&config, &mut state, &paths).await?;
 
-        assert_eq!(state.status, UpdateStatus::ReadyToInstall);
-        assert_eq!(state.last_check_at, None);
+            assert_eq!(state.status, status);
+            assert_eq!(state.last_check_at, None);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn check_lock_file_without_kernel_lock_does_not_block_acquire() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let paths = RuntimePaths {
+            config_file: temp.path().join("config/config.toml"),
+            state_file: temp.path().join("state/state.json"),
+            log_file: temp.path().join("state/service.log"),
+            cache_dir: temp.path().join("cache"),
+            state_dir: temp.path().join("state"),
+            config_dir: temp.path().join("config"),
+        };
+        paths.ensure_dirs()?;
+        let lock_path = paths.state_dir.join("check.lock");
+        std::fs::write(&lock_path, b"stale-pid")?;
+
+        let lock = try_acquire_check_lock(&paths)?;
+
+        assert!(lock.is_some());
+        assert_eq!(
+            std::fs::read_to_string(&lock_path)?.trim(),
+            std::process::id().to_string()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn held_check_lock_blocks_second_acquire_until_drop() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let paths = RuntimePaths {
+            config_file: temp.path().join("config/config.toml"),
+            state_file: temp.path().join("state/state.json"),
+            log_file: temp.path().join("state/service.log"),
+            cache_dir: temp.path().join("cache"),
+            state_dir: temp.path().join("state"),
+            config_dir: temp.path().join("config"),
+        };
+        paths.ensure_dirs()?;
+
+        let first_lock = try_acquire_check_lock(&paths)?;
+        let second_lock = try_acquire_check_lock(&paths)?;
+
+        assert!(first_lock.is_some());
+        assert!(second_lock.is_none());
+
+        drop(first_lock);
+        let reacquired_lock = try_acquire_check_lock(&paths)?;
+
+        assert!(reacquired_lock.is_some());
         Ok(())
     }
 
@@ -732,6 +932,17 @@ mod tests {
         assert_eq!(
             compare_generated_versions("2026.04.01.035152", "2026.03.27.025604+1086e799"),
             Some(std::cmp::Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn generated_versions_ignore_package_release_suffixes() {
+        assert_eq!(
+            compare_generated_versions(
+                "2026.04.25.054929-90dd7716x11.fc43",
+                "2026.04.25.054929+90dd7716",
+            ),
+            Some(std::cmp::Ordering::Equal)
         );
     }
 
@@ -875,6 +1086,59 @@ mod tests {
         assert!(state
             .notified_events
             .contains("installed:2026.04.16.120000"));
+        Ok(())
+    }
+
+    #[test]
+    fn cli_missing_notifications_are_deduplicated() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let paths = RuntimePaths {
+            config_file: temp.path().join("config/config.toml"),
+            state_file: temp.path().join("state/state.json"),
+            log_file: temp.path().join("state/service.log"),
+            cache_dir: temp.path().join("cache"),
+            state_dir: temp.path().join("state"),
+            config_dir: temp.path().join("config"),
+        };
+        paths.ensure_dirs()?;
+
+        let mut state = PersistedState::new(true);
+        state.cli_path = None;
+        state.cli_installed_version = None;
+        state.cli_error_message =
+            Some("Codex CLI not found in PATH or known install locations".to_string());
+
+        maybe_notify_cli_missing(&mut state, &paths, false)?;
+        let notified_count = state.notified_events.len();
+        maybe_notify_cli_missing(&mut state, &paths, false)?;
+
+        assert_eq!(state.notified_events.len(), notified_count);
+        assert!(state.notified_events.contains("cli_missing"));
+        Ok(())
+    }
+
+    #[test]
+    fn cli_missing_notification_marker_is_cleared_after_recovery() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let paths = RuntimePaths {
+            config_file: temp.path().join("config/config.toml"),
+            state_file: temp.path().join("state/state.json"),
+            log_file: temp.path().join("state/service.log"),
+            cache_dir: temp.path().join("cache"),
+            state_dir: temp.path().join("state"),
+            config_dir: temp.path().join("config"),
+        };
+        paths.ensure_dirs()?;
+
+        let mut state = PersistedState::new(true);
+        state.notified_events.insert("cli_missing".to_string());
+        state.cli_path = Some(temp.path().join("codex"));
+        state.cli_installed_version = Some("0.42.0".to_string());
+        state.cli_error_message = None;
+
+        maybe_notify_cli_missing(&mut state, &paths, false)?;
+
+        assert!(!state.notified_events.contains("cli_missing"));
         Ok(())
     }
 }
