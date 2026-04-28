@@ -1057,6 +1057,24 @@ is_interactive_terminal() {
     [ -t 0 ] && [ -t 1 ]
 }
 
+run_gui_cli_prompt() {
+    if ! command -v codex-update-manager >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local refreshed_path=""
+    if ! refreshed_path="$(codex-update-manager prompt-install-cli --cli-path "$CODEX_CLI_PATH" --print-path)"; then
+        return 1
+    fi
+
+    if [ -n "$refreshed_path" ]; then
+        CODEX_CLI_PATH="$refreshed_path"
+        export CODEX_CLI_PATH
+    fi
+
+    return 0
+}
+
 prompt_install_missing_cli() {
     if ! is_interactive_terminal; then
         return 1
@@ -1638,11 +1656,16 @@ export CHROME_DESKTOP="${CHROME_DESKTOP:-$CODEX_LINUX_APP_ID.desktop}"
 export ELECTRON_RENDERER_URL="${ELECTRON_RENDERER_URL:-$WEBVIEW_ORIGIN/}"
 
 if needs_cold_start && [ -z "$CODEX_CLI_PATH" ]; then
-    if prompt_install_missing_cli; then
-        if ! run_cli_preflight 1; then
-            notify_error "Codex CLI automatic installation failed. Install with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
-            exit 1
+    if is_interactive_terminal; then
+        if prompt_install_missing_cli; then
+            if ! run_cli_preflight 1; then
+                notify_error "Codex CLI automatic installation failed. Install with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
+                exit 1
+            fi
         fi
+    elif ! run_gui_cli_prompt; then
+        notify_error "Codex CLI not found. Install with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
+        exit 1
     fi
 fi
 

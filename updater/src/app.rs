@@ -14,15 +14,20 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fs4::fs_std::FileExt;
 use reqwest::Client;
 use std::{
+    ffi::OsString,
     fs::{self, OpenOptions},
     io::{Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
+    process::Command,
 };
 use tokio::time::{self, Duration};
 use tracing::{error, info, warn};
 
 const RECONCILE_INTERVAL_SECONDS: u64 = 15;
 const CLI_MISSING_NOTIFICATION_EVENT: &str = "cli_missing";
+const CLI_MISSING_PROMPT_DISMISS_TTL: ChronoDuration = ChronoDuration::minutes(10);
+const PROMPT_INSTALL_CLI_CANCELLED_EXIT_CODE: i32 = 10;
+const PROMPT_INSTALL_CLI_NO_BACKEND_EXIT_CODE: i32 = 11;
 
 /// Runs the updater command-line entrypoint.
 pub async fn run(cli: Cli) -> Result<()> {
@@ -52,6 +57,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             print_path,
             allow_install_missing,
         ),
+        Commands::PromptInstallCli {
+            cli_path,
+            print_path,
+        } => run_prompt_install_cli(&mut state, &paths, cli_path, print_path),
         Commands::Status { json } => run_status(&mut state, &paths, json),
         Commands::InstallDeb { path } => install::install_deb(&path),
         Commands::InstallRpm { path } => install::install_rpm(&path),
@@ -162,7 +171,7 @@ async fn run_daemon(
 ) -> Result<()> {
     sync_and_persist(config, state, paths)?;
     recover_interrupted_install(state, paths)?;
-    codex_cli::refresh_status(state, paths)?;
+    codex_cli::refresh_cached_status(state, paths)?;
     maybe_notify_cli_missing(state, paths, config.notifications)?;
     maybe_notify_installed(state, paths, config.notifications)?;
     if packaged_runtime_removed(config) {
@@ -220,7 +229,7 @@ async fn run_check_now(
 ) -> Result<()> {
     sync_and_persist(config, state, paths)?;
     recover_interrupted_install(state, paths)?;
-    codex_cli::refresh_status(state, paths)?;
+    codex_cli::refresh_cached_status(state, paths)?;
     maybe_notify_cli_missing(state, paths, config.notifications)?;
     maybe_notify_installed(state, paths, config.notifications)?;
     if if_stale && upstream_check_is_fresh(config, state) {
@@ -270,6 +279,29 @@ fn run_status(state: &mut PersistedState, paths: &RuntimePaths, json: bool) -> R
     Ok(())
 }
 
+fn run_prompt_install_cli(
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    cli_path: Option<PathBuf>,
+    print_path: bool,
+) -> Result<()> {
+    let outcome = prompt_install_cli(state, paths, cli_path)?;
+    match outcome {
+        PromptInstallCliOutcome::Installed(path) => {
+            if print_path {
+                println!("{}", path.display());
+            }
+            std::process::exit(0);
+        }
+        PromptInstallCliOutcome::Cancelled => {
+            std::process::exit(PROMPT_INSTALL_CLI_CANCELLED_EXIT_CODE);
+        }
+        PromptInstallCliOutcome::NoBackend => {
+            std::process::exit(PROMPT_INSTALL_CLI_NO_BACKEND_EXIT_CODE);
+        }
+    }
+}
+
 fn run_cli_preflight(
     state: &mut PersistedState,
     paths: &RuntimePaths,
@@ -282,6 +314,143 @@ fn run_cli_preflight(
         println!("{}", outcome.cli_path.display());
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PromptInstallCliOutcome {
+    Installed(PathBuf),
+    Cancelled,
+    NoBackend,
+}
+
+fn prompt_install_cli(
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    cli_path: Option<PathBuf>,
+) -> Result<PromptInstallCliOutcome> {
+    if let Some(path) = cli_path
+        .clone()
+        .filter(|path| path.is_file())
+        .or_else(|| state.cli_path.clone().filter(|path| path.is_file()))
+    {
+        return Ok(PromptInstallCliOutcome::Installed(path));
+    }
+
+    if recently_dismissed_cli_prompt(state) {
+        return Ok(PromptInstallCliOutcome::Cancelled);
+    }
+
+    if !has_graphical_session() {
+        return Ok(PromptInstallCliOutcome::NoBackend);
+    }
+
+    let consent = if prefers_kdialog() && command_in_path("kdialog").is_some() {
+        run_kdialog_prompt()?
+    } else if command_in_path("zenity").is_some() {
+        run_zenity_prompt()?
+    } else if command_in_path("kdialog").is_some() {
+        run_kdialog_prompt()?
+    } else {
+        run_actionable_notification_prompt()?
+    };
+
+    if !consent {
+        state.cli_prompt_dismissed_at = Some(Utc::now());
+        persist_state(paths, state)?;
+        return Ok(PromptInstallCliOutcome::Cancelled);
+    }
+
+    state.cli_prompt_dismissed_at = None;
+    let outcome = codex_cli::preflight(state, paths, cli_path, true)?;
+    Ok(PromptInstallCliOutcome::Installed(outcome.cli_path))
+}
+
+fn recently_dismissed_cli_prompt(state: &PersistedState) -> bool {
+    state.cli_prompt_dismissed_at.is_some_and(|dismissed_at| {
+        Utc::now().signed_duration_since(dismissed_at) < CLI_MISSING_PROMPT_DISMISS_TTL
+    })
+}
+
+fn has_graphical_session() -> bool {
+    let has_display =
+        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let has_dbus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
+        || std::env::var_os("XDG_RUNTIME_DIR").is_some();
+    has_display && has_dbus
+}
+
+fn prefers_kdialog() -> bool {
+    desktop_tokens().iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "kde" | "plasma" | "plasmawayland" | "plasmax11"
+        )
+    })
+}
+
+fn desktop_tokens() -> Vec<String> {
+    [
+        std::env::var("XDG_CURRENT_DESKTOP").ok(),
+        std::env::var("DESKTOP_SESSION").ok(),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|value| {
+        value
+            .split(':')
+            .map(|segment| segment.trim().to_ascii_lowercase())
+            .collect::<Vec<_>>()
+    })
+    .filter(|token| !token.is_empty())
+    .collect()
+}
+
+fn command_in_path(name: &str) -> Option<PathBuf> {
+    let path_env = std::env::var_os("PATH").unwrap_or_else(|| OsString::from(""));
+    std::env::split_paths(&path_env).find_map(|entry| {
+        let candidate = entry.join(name);
+        if candidate.is_file() {
+            Some(candidate)
+        } else {
+            None
+        }
+    })
+}
+
+fn run_kdialog_prompt() -> Result<bool> {
+    let status = Command::new("kdialog")
+        .args([
+            "--title",
+            "Codex Desktop",
+            "--yesno",
+            "Codex CLI is not installed. Install it now?",
+        ])
+        .status()
+        .context("Failed to launch kdialog")?;
+    Ok(status.success())
+}
+
+fn run_zenity_prompt() -> Result<bool> {
+    let status = Command::new("zenity")
+        .args([
+            "--question",
+            "--title=Codex Desktop",
+            "--text=Codex CLI is not installed. Install it now?",
+        ])
+        .status()
+        .context("Failed to launch zenity")?;
+    Ok(status.success())
+}
+
+fn run_actionable_notification_prompt() -> Result<bool> {
+    match notify::send_actionable(
+        "Codex CLI not installed",
+        "Codex Desktop needs the Codex CLI. Choose Install now to let Codex Desktop install it.",
+        &[("install", "Install now"), ("dismiss", "Dismiss")],
+    )? {
+        notify::ActionResponse::Invoked(action) if action == "install" => Ok(true),
+        _ => Ok(false),
+    }
 }
 
 async fn run_check_cycle(
