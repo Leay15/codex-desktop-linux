@@ -60,13 +60,17 @@ Install the Rust toolchain:
 stage_common_package_files() {
     local root="$1"
     local app_root="$root/opt/$PACKAGE_NAME"
+    local polkit_policy="$REPO_DIR/packaging/linux/com.github.ilysenko.codex-desktop-linux.update.policy"
+
+    ensure_file_exists "$polkit_policy" "polkit policy"
 
     mkdir -p \
         "$root/opt" \
         "$root/usr/bin" \
         "$root/usr/lib/systemd/user" \
         "$root/usr/share/applications" \
-        "$root/usr/share/icons/hicolor/256x256/apps"
+        "$root/usr/share/icons/hicolor/256x256/apps" \
+        "$root/usr/share/polkit-1/actions"
 
     rm -rf "$app_root"
     cp -aT "$APP_DIR" "$app_root"
@@ -78,6 +82,8 @@ stage_common_package_files() {
     chmod 0755 "$root/usr/bin/codex-update-manager"
     cp "$UPDATER_SERVICE_SOURCE" "$root/usr/lib/systemd/user/codex-update-manager.service"
     chmod 0644 "$root/usr/lib/systemd/user/codex-update-manager.service"
+    cp "$polkit_policy" "$root/usr/share/polkit-1/actions/com.github.ilysenko.codex-desktop-linux.update.policy"
+    chmod 0644 "$root/usr/share/polkit-1/actions/com.github.ilysenko.codex-desktop-linux.update.policy"
     cp "$PACKAGED_RUNTIME_SOURCE" "$app_root/.codex-linux/codex-packaged-runtime.sh"
     chmod 0644 "$app_root/.codex-linux/codex-packaged-runtime.sh"
 }
@@ -102,6 +108,8 @@ stage_update_builder_bundle() {
     cp "$REPO_DIR/packaging/linux/codex-desktop.spec" "$update_builder_root/packaging/linux/codex-desktop.spec"
     cp "$REPO_DIR/packaging/linux/codex-desktop.desktop" "$update_builder_root/packaging/linux/codex-desktop.desktop"
     cp "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh" "$update_builder_root/packaging/linux/codex-packaged-runtime.sh"
+    cp "$REPO_DIR/packaging/linux/com.github.ilysenko.codex-desktop-linux.update.policy" \
+        "$update_builder_root/packaging/linux/com.github.ilysenko.codex-desktop-linux.update.policy"
     cp "$REPO_DIR/packaging/linux/codex-update-manager-user-service.sh" \
         "$update_builder_root/packaging/linux/codex-update-manager-user-service.sh"
     cp "$REPO_DIR/packaging/linux/PKGBUILD.template" "$update_builder_root/packaging/linux/PKGBUILD.template"

@@ -11,6 +11,7 @@ depends=(
     'npm'
     'python'
     'p7zip'
+    'polkit'
     'curl'
     'unzip'
     'gcc'
