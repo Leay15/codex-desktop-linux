@@ -5,7 +5,7 @@ Summary:        Codex Desktop for Linux
 License:        Proprietary
 ExclusiveArch:  __ARCH__
 
-Requires:       nodejs, npm, python3, p7zip, curl, unzip, gcc-c++, make
+Requires:       nodejs, npm, python3, p7zip, polkit, curl, unzip, gcc-c++, make
 Requires:       alsa-lib, at-spi2-atk, atk, glib2, gtk3, libdrm
 Requires:       nspr, nss, pango, libstdc++, libX11, libxcb
 Requires:       libXcomposite, libXdamage, libXext, libXfixes, libxkbcommon, libXrandr
@@ -30,6 +30,7 @@ cp -a "__RPM_STAGING_DIR__/." "%{buildroot}/"
 /usr/lib/systemd/user/codex-update-manager.service
 /usr/share/applications/__PACKAGE_NAME__.desktop
 /usr/share/icons/hicolor/256x256/apps/__PACKAGE_NAME__.png
+/usr/share/polkit-1/actions/com.github.ilysenko.codex-desktop-linux.update.policy
 
 %post
 if command -v update-desktop-database >/dev/null 2>&1; then
@@ -45,10 +46,8 @@ fi
 %preun
 SERVICE_HELPER=/opt/__PACKAGE_NAME__/update-builder/packaging/linux/codex-update-manager-user-service.sh
 [ -f "$SERVICE_HELPER" ] && . "$SERVICE_HELPER"
-if [ -f "$SERVICE_HELPER" ]; then
-    codex_cleanup_user_service stop || true
-fi
 if [ $1 -eq 0 ] && [ -f "$SERVICE_HELPER" ]; then
+    codex_cleanup_user_service stop || true
     codex_cleanup_user_service disable || true
 fi
 

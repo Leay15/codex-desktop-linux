@@ -214,6 +214,66 @@ extract_dmg() {
     echo "$app_dir"
 }
 
+# ---- Detect Electron version from DMG ----
+sanitize_electron_version() {
+    local value="$1"
+    value="${value#v}"
+    value="${value#^}"
+    value="${value#~}"
+
+    if [[ "$value" =~ ^[0-9]+(\.[0-9]+){2}([.-][0-9A-Za-z]+)*$ ]]; then
+        echo "$value"
+        return 0
+    fi
+
+    return 1
+}
+
+detect_electron_version() {
+    local app_dir="$1"
+    local detected=""
+    local detected_version=""
+    local plist_file="$app_dir/Contents/Frameworks/Electron Framework.framework/Versions/A/Resources/Info.plist"
+
+    if [ -f "$plist_file" ]; then
+        detected=$(python3 - "$plist_file" <<'PY' 2>/dev/null || true
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    print(plistlib.load(handle).get("CFBundleVersion", ""))
+PY
+)
+        if detected_version=$(sanitize_electron_version "$detected"); then
+            ELECTRON_VERSION="$detected_version"
+            info "Detected Electron version from DMG: $ELECTRON_VERSION"
+            return 0
+        elif [ -n "$detected" ]; then
+            warn "Ignoring invalid Electron version from DMG: $detected"
+        fi
+    fi
+
+    local resources_dir="$app_dir/Contents/Resources"
+    if [ -f "$resources_dir/app.asar" ]; then
+        detected=$(npx --yes asar extract-file "$resources_dir/app.asar" package.json 2>/dev/null |
+            node -e '
+const fs = require("node:fs");
+const pkg = JSON.parse(fs.readFileSync(0, "utf8"));
+process.stdout.write(String(pkg.devDependencies?.electron ?? pkg.dependencies?.electron ?? ""));
+' 2>/dev/null || true)
+        if detected_version=$(sanitize_electron_version "$detected"); then
+            ELECTRON_VERSION="$detected_version"
+            info "Detected Electron version from package.json: $ELECTRON_VERSION"
+            return 0
+        elif [ -n "$detected" ]; then
+            warn "Ignoring invalid Electron version from package.json: $detected"
+        fi
+    fi
+
+    warn "Could not auto-detect Electron version; using fallback $ELECTRON_VERSION"
+    return 0
+}
+
 # ---- Build native modules in a clean directory ----
 build_native_modules() {
     local app_extracted="$1"
@@ -935,6 +995,7 @@ main() {
     local app_dir
     app_dir=$(extract_dmg "$dmg_path")
 
+    detect_electron_version "$app_dir"
     patch_asar "$app_dir"
     download_electron
     extract_webview "$app_dir"
@@ -952,4 +1013,6 @@ main() {
     echo "============================================" >&2
 }
 
-main "$@"
+if [ "${CODEX_INSTALLER_SOURCE_ONLY:-0}" != "1" ]; then
+    main "$@"
+fi

@@ -3,42 +3,33 @@
 const fs = require("fs");
 const path = require("path");
 
-const extractedDir = process.argv[2];
-
-if (!extractedDir) {
-  console.error("Usage: patch-linux-window-ui.js <extracted-app-asar-dir>");
-  process.exit(1);
+function readDirectoryNames(dir) {
+  if (!fs.existsSync(dir)) {
+    return [];
+  }
+  return fs.readdirSync(dir);
 }
 
-const assetsDir = path.join(extractedDir, "webview", "assets");
-const iconAsset = fs
-  .readdirSync(assetsDir)
-  .find((name) => /^app-.*\.png$/.test(name));
+function findMainBundle(extractedDir) {
+  const buildDir = path.join(extractedDir, ".vite", "build");
+  const mainBundle = readDirectoryNames(buildDir).find((name) =>
+    /^main(?:-[^.]+)?\.js$/.test(name),
+  );
 
-if (!iconAsset) {
-  console.warn(`WARN: Could not find app icon asset in ${assetsDir} — skipping all UI patches`);
-  process.exit(0);
+  return mainBundle == null ? null : { buildDir, mainBundle };
 }
 
-const buildDir = path.join(extractedDir, ".vite", "build");
-const mainBundle = fs
-  .readdirSync(buildDir)
-  .find((name) => /^main(?:-[^.]+)?\.js$/.test(name));
-
-if (!mainBundle) {
-  console.warn(`WARN: Could not find main bundle in ${buildDir} — skipping all UI patches`);
-  process.exit(0);
+function findIconAsset(extractedDir) {
+  const assetsDir = path.join(extractedDir, "webview", "assets");
+  return readDirectoryNames(assetsDir).find((name) => /^app-.*\.png$/.test(name)) ?? null;
 }
 
-const target = path.join(buildDir, mainBundle);
-let source = fs.readFileSync(target, "utf8");
-const packageJsonPath = path.join(extractedDir, "package.json");
-const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-const webviewAssetsDir = path.join(extractedDir, "webview", "assets");
-
-function patchAssetFiles(filenamePattern, patchFn, missingWarnMessage) {
+function patchAssetFiles(extractedDir, filenamePattern, patchFn, missingWarnMessage) {
+  const webviewAssetsDir = path.join(extractedDir, "webview", "assets");
   if (!fs.existsSync(webviewAssetsDir)) {
-    console.warn(`WARN: Could not find webview assets directory in ${webviewAssetsDir} — skipping asset patch`);
+    console.warn(
+      `WARN: Could not find webview assets directory in ${webviewAssetsDir} — skipping asset patch`,
+    );
     return;
   }
 
@@ -74,7 +65,9 @@ function applyLinuxOpaqueWindowsDefaultPatch(currentSource) {
   } else if (patchedSource.includes(mergeNeedle)) {
     patchedSource = patchedSource.replace(mergeNeedle, mergePatch);
   } else if (patchedSource.includes("opaqueWindows") && patchedSource.includes("semanticColors")) {
-    console.warn("WARN: Could not find Linux opaque window default insertion point — skipping settings default patch");
+    console.warn(
+      "WARN: Could not find Linux opaque window default insertion point — skipping settings default patch",
+    );
   }
 
   const settingsNeedle =
@@ -118,64 +111,187 @@ function applyLinuxOpaqueWindowsDefaultPatch(currentSource) {
   return patchedSource;
 }
 
+function requireName(source, moduleName) {
+  const escaped = moduleName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = source.match(new RegExp(`([A-Za-z_$][\\w$]*)=require\\(\`${escaped}\`\\)`));
+  return match?.[1] ?? null;
+}
+
+function findCallBlock(source, marker) {
+  const markerStart = source.indexOf(marker);
+  if (markerStart === -1) {
+    return null;
+  }
+
+  const blockStart = Math.max(
+    source.lastIndexOf("var ", markerStart),
+    source.lastIndexOf("let ", markerStart),
+    source.lastIndexOf("const ", markerStart),
+  );
+  const blockEnd = source.indexOf("});", markerStart);
+  if (blockStart === -1 || blockEnd === -1) {
+    return null;
+  }
+
+  return {
+    start: blockStart,
+    end: blockEnd + "});".length,
+    text: source.slice(blockStart, blockEnd + "});".length),
+  };
+}
+
 function applyLinuxFileManagerPatch(currentSource) {
-  const fileManagerNeedle =
-    "var sa=Mi({id:`fileManager`,label:`Finder`,icon:`apps/finder.png`,kind:`fileManager`,darwin:{detect:()=>`open`,args:e=>ai(e)},win32:{label:`File Explorer`,icon:`apps/file-explorer.png`,detect:ca,args:e=>ai(e),open:async({path:e})=>la(e)}});";
-  const fileManagerLinuxPatch =
-    "var sa=Mi({id:`fileManager`,label:`Finder`,icon:`apps/finder.png`,kind:`fileManager`,darwin:{detect:()=>`open`,args:e=>ai(e)},win32:{label:`File Explorer`,icon:`apps/file-explorer.png`,detect:ca,args:e=>ai(e),open:async({path:e})=>la(e)},linux:{label:`File Manager`,icon:`apps/file-explorer.png`,detect:()=>`linux-file-manager`,args:e=>[e],open:async({path:e})=>{let r=ua(e)??e,i=(0,a.existsSync)(r)&&(0,a.statSync)(r).isFile()?(0,t.dirname)(r):r,o=await n.shell.openPath(i);if(o)throw Error(o)}}});";
-  const fileManagerId = "id:`fileManager`";
-  const fileManagerBlockEnd = "function ca(){";
-  const systemDefaultLinuxNeedle = "id:`systemDefault`";
-
-  const fileManagerStart = currentSource.indexOf(fileManagerId);
-  if (fileManagerStart === -1) {
+  const block = findCallBlock(currentSource, "id:`fileManager`");
+  if (block == null) {
     console.error("Failed to apply Linux File Manager Patch");
     return currentSource;
   }
 
-  const fileManagerEnd = currentSource.indexOf(fileManagerBlockEnd, fileManagerStart);
-  if (fileManagerEnd === -1) {
+  if (block.text.includes("linux:{")) {
+    return currentSource;
+  }
+
+  const electronVar = requireName(currentSource, "electron");
+  const fsVar = requireName(currentSource, "node:fs");
+  const pathVar = requireName(currentSource, "node:path");
+  if (electronVar == null || fsVar == null || pathVar == null) {
     console.error("Failed to apply Linux File Manager Patch");
     return currentSource;
   }
 
-  const fileManagerBlock = currentSource.slice(fileManagerStart, fileManagerEnd);
-  if (fileManagerBlock.includes("linux:{")) {
-    return currentSource;
-  }
-
-  if (!currentSource.includes(fileManagerNeedle)) {
+  const insertionPoint = block.text.lastIndexOf("}});");
+  if (insertionPoint === -1) {
     console.error("Failed to apply Linux File Manager Patch");
     return currentSource;
   }
 
-  const patchedSource = currentSource.replace(fileManagerNeedle, fileManagerLinuxPatch);
-  const patchedFileManagerEnd = patchedSource.indexOf(fileManagerBlockEnd, fileManagerStart);
-  if (patchedFileManagerEnd === -1) {
-    console.error("Failed to apply Linux File Manager Patch");
-    return currentSource;
-  }
+  const linuxFileManager =
+    `,linux:{label:\`File Manager\`,icon:\`apps/file-explorer.png\`,detect:()=>\`linux-file-manager\`,args:e=>[e],open:async({path:e})=>{let __codexResolved=e;for(;;){if((0,${fsVar}.existsSync)(__codexResolved))break;let __codexParent=(0,${pathVar}.dirname)(__codexResolved);if(__codexParent===__codexResolved){__codexResolved=null;break}__codexResolved=__codexParent}let __codexOpenTarget=__codexResolved??e;if((0,${fsVar}.existsSync)(__codexOpenTarget)&&(0,${fsVar}.statSync)(__codexOpenTarget).isFile())__codexOpenTarget=(0,${pathVar}.dirname)(__codexOpenTarget);let __codexError=await ${electronVar}.shell.openPath(__codexOpenTarget);if(__codexError)throw Error(__codexError)}}`;
 
-  const patchedFileManagerBlock = patchedSource.slice(fileManagerStart, patchedFileManagerEnd);
-  const systemDefaultStart = patchedSource.indexOf(systemDefaultLinuxNeedle);
-  const systemDefaultBlock = systemDefaultStart === -1
-    ? ""
-    : patchedSource.slice(
-        systemDefaultStart,
-        patchedSource.indexOf("async function Wa", systemDefaultStart),
-      );
+  const patchedBlock =
+    block.text.slice(0, insertionPoint + 1) +
+    linuxFileManager +
+    block.text.slice(insertionPoint + 1);
+  const patchedSource =
+    currentSource.slice(0, block.start) + patchedBlock + currentSource.slice(block.end);
 
+  const patchedBlockCheck = patchedSource.slice(block.start, block.start + patchedBlock.length);
   if (
-    !patchedFileManagerBlock.includes("linux:{label:`File Manager`") ||
-    !patchedFileManagerBlock.includes("detect:()=>`linux-file-manager`") ||
-    !patchedFileManagerBlock.includes("n.shell.openPath(i)") ||
-    !systemDefaultBlock.includes("linux:{detect:()=>`system-default`")
+    !patchedBlockCheck.includes("linux:{label:`File Manager`") ||
+    !patchedBlockCheck.includes("detect:()=>`linux-file-manager`") ||
+    !patchedBlockCheck.includes(`${electronVar}.shell.openPath(__codexOpenTarget)`)
   ) {
     console.error("Failed to apply Linux File Manager Patch");
     return currentSource;
   }
 
   return patchedSource;
+}
+
+function applyLinuxWindowOptionsPatch(currentSource, iconAsset) {
+  if (iconAsset == null) {
+    return currentSource;
+  }
+
+  const windowOptionsNeedle = "...process.platform===`win32`?{autoHideMenuBar:!0}:{},";
+  const iconPathExpression = `process.resourcesPath+\`/../content/webview/assets/${iconAsset}\``;
+  const iconPathNeedle = `icon:${iconPathExpression}`;
+  const windowOptionsReplacement =
+    `...process.platform===\`win32\`||process.platform===\`linux\`?{autoHideMenuBar:!0,...process.platform===\`linux\`?{${iconPathNeedle}}:{}}:{},`;
+
+  if (currentSource.includes(iconPathNeedle)) {
+    return currentSource;
+  }
+
+  if (currentSource.includes(windowOptionsNeedle)) {
+    return currentSource.replace(windowOptionsNeedle, windowOptionsReplacement);
+  }
+
+  console.warn("WARN: Could not find BrowserWindow autoHideMenuBar snippet — skipping window options patch");
+  return currentSource;
+}
+
+function applyLinuxMenuPatch(currentSource) {
+  const menuRegex = /process\.platform===`win32`&&([A-Za-z_$][\w$]*)\.removeMenu\(\),/g;
+  let patchedAny = false;
+  const patchedSource = currentSource.replace(menuRegex, (match, windowVar) => {
+    const linuxPatch = `process.platform===\`linux\`&&${windowVar}.setMenuBarVisibility(!1),`;
+    if (currentSource.includes(`${linuxPatch}${match}`)) {
+      return match;
+    }
+    patchedAny = true;
+    return `${linuxPatch}${match}`;
+  });
+
+  if (!patchedAny && menuRegex.test(currentSource) && !currentSource.includes("setMenuBarVisibility(!1),process.platform===`win32`")) {
+    console.warn("WARN: Could not find window menu visibility snippet — skipping menu patch");
+  }
+
+  return patchedSource;
+}
+
+function applyLinuxSetIconPatch(currentSource, iconAsset) {
+  if (iconAsset == null) {
+    return currentSource;
+  }
+
+  const iconPathExpression = `process.resourcesPath+\`/../content/webview/assets/${iconAsset}\``;
+  if (currentSource.includes(`setIcon(${iconPathExpression})`)) {
+    return currentSource;
+  }
+
+  const readyRegex = /([A-Za-z_$][\w$]*)\.once\(`ready-to-show`,\(\)=>\{/;
+  const match = currentSource.match(readyRegex);
+  if (match == null) {
+    console.warn("WARN: Could not find window setIcon insertion point — skipping setIcon patch");
+    return currentSource;
+  }
+
+  const windowVar = match[1];
+  return currentSource.replace(
+    readyRegex,
+    `process.platform===\`linux\`&&${windowVar}.setIcon(${iconPathExpression}),${match[0]}`,
+  );
+}
+
+function applyLinuxOpaqueBackgroundPatch(currentSource) {
+  if (currentSource.includes("process.platform===`linux`?{backgroundColor:")) {
+    return currentSource;
+  }
+
+  const colorConstRegex =
+    /([A-Za-z_$][\w$]*)=`#00000000`,([A-Za-z_$][\w$]*)=`#000000`,([A-Za-z_$][\w$]*)=`#f9f9f9`/;
+  const colorMatch = currentSource.match(colorConstRegex);
+
+  if (!colorMatch) {
+    console.warn(
+      "WARN: Could not find color constants (#00000000, #000000, #f9f9f9) — skipping background patch",
+    );
+    return currentSource;
+  }
+
+  const [, transparentVar, darkVar, lightVar] = colorMatch;
+  const funcParamRegex =
+    /prefersDarkColors:([A-Za-z_$][\w$]*)\}\)\{return\s*([A-Za-z_$][\w$]*)===`win32`/;
+  const funcMatch = currentSource.match(funcParamRegex);
+
+  if (funcMatch == null) {
+    console.warn("WARN: Could not find prefersDarkColors parameter — skipping background patch");
+    return currentSource;
+  }
+
+  const darkColorsParam = funcMatch[1];
+  const bgNeedle =
+    `backgroundMaterial:\`mica\`}:{backgroundColor:${transparentVar},backgroundMaterial:null}}`;
+  const bgReplacement =
+    `backgroundMaterial:\`mica\`}:process.platform===\`linux\`?{backgroundColor:${darkColorsParam}?${darkVar}:${lightVar},backgroundMaterial:null}:{backgroundColor:${transparentVar},backgroundMaterial:null}}`;
+
+  if (currentSource.includes(bgNeedle)) {
+    return currentSource.replace(bgNeedle, bgReplacement);
+  }
+
+  console.warn("WARN: Could not find BrowserWindow background color needle — skipping background patch");
+  return currentSource;
 }
 
 function applyLinuxTrayPatch(currentSource, iconPathExpression) {
@@ -197,16 +313,18 @@ function applyLinuxTrayPatch(currentSource, iconPathExpression) {
     console.warn("WARN: Could not find tray platform guard — skipping Linux tray guard patch");
   }
 
-  const trayIconNeedle =
-    "for(let e of o){let t=n.nativeImage.createFromPath(e);if(!t.isEmpty())return{defaultIcon:t,chronicleRunningIcon:null}}return{defaultIcon:await n.app.getFileIcon(process.execPath,{size:process.platform===`win32`?`small`:`normal`}),chronicleRunningIcon:null}}";
-  const trayIconPatch =
-    `for(let e of o){let t=n.nativeImage.createFromPath(e);if(!t.isEmpty())return{defaultIcon:t,chronicleRunningIcon:null}}if(process.platform===\`linux\`){let e=n.nativeImage.createFromPath(${iconPathExpression});if(!e.isEmpty())return{defaultIcon:e,chronicleRunningIcon:null}}return{defaultIcon:await n.app.getFileIcon(process.execPath,{size:process.platform===\`win32\`?\`small\`:\`normal\`}),chronicleRunningIcon:null}}`;
-  if (patchedSource.includes(`nativeImage.createFromPath(${iconPathExpression})`)) {
-    // Already patched.
-  } else if (patchedSource.includes(trayIconNeedle)) {
-    patchedSource = patchedSource.replace(trayIconNeedle, trayIconPatch);
-  } else {
-    console.warn("WARN: Could not find tray icon fallback — skipping Linux tray icon patch");
+  if (iconPathExpression != null) {
+    const trayIconNeedle =
+      "for(let e of o){let t=n.nativeImage.createFromPath(e);if(!t.isEmpty())return{defaultIcon:t,chronicleRunningIcon:null}}return{defaultIcon:await n.app.getFileIcon(process.execPath,{size:process.platform===`win32`?`small`:`normal`}),chronicleRunningIcon:null}}";
+    const trayIconPatch =
+      `for(let e of o){let t=n.nativeImage.createFromPath(e);if(!t.isEmpty())return{defaultIcon:t,chronicleRunningIcon:null}}if(process.platform===\`linux\`){let e=n.nativeImage.createFromPath(${iconPathExpression});if(!e.isEmpty())return{defaultIcon:e,chronicleRunningIcon:null}}return{defaultIcon:await n.app.getFileIcon(process.execPath,{size:process.platform===\`win32\`?\`small\`:\`normal\`}),chronicleRunningIcon:null}}`;
+    if (patchedSource.includes(`nativeImage.createFromPath(${iconPathExpression})`)) {
+      // Already patched.
+    } else if (patchedSource.includes(trayIconNeedle)) {
+      patchedSource = patchedSource.replace(trayIconNeedle, trayIconPatch);
+    } else {
+      console.warn("WARN: Could not find tray icon fallback — skipping Linux tray icon patch");
+    }
   }
 
   const closeToTrayNeedle =
@@ -340,111 +458,132 @@ function applyLinuxSingleInstancePatch(currentSource) {
   return patchedSource;
 }
 
-
-const windowOptionsNeedle =
-  "...process.platform===`win32`?{autoHideMenuBar:!0}:{},";
-const iconPathExpression =
-  `process.resourcesPath+\`/../content/webview/assets/${iconAsset}\``;
-const iconPathNeedle =
-  `icon:${iconPathExpression}`;
-const windowOptionsReplacement =
-  `...process.platform===\`win32\`||process.platform===\`linux\`?{autoHideMenuBar:!0,...process.platform===\`linux\`?{${iconPathNeedle}}:{}}:{},`;
-
-if (source.includes(windowOptionsNeedle)) {
-  source = source.replace(windowOptionsNeedle, windowOptionsReplacement);
-} else if (!source.includes(iconPathNeedle)) {
-  console.warn("WARN: Could not find BrowserWindow autoHideMenuBar snippet — skipping window options patch");
+function patchMainBundleSource(source, iconAsset) {
+  let patched = source;
+  const iconPathExpression =
+    iconAsset == null ? null : `process.resourcesPath+\`/../content/webview/assets/${iconAsset}\``;
+  patched = applyLinuxWindowOptionsPatch(patched, iconAsset);
+  patched = applyLinuxMenuPatch(patched);
+  patched = applyLinuxSetIconPatch(patched, iconAsset);
+  patched = applyLinuxOpaqueBackgroundPatch(patched);
+  patched = applyLinuxFileManagerPatch(patched);
+  patched = applyLinuxTrayPatch(patched, iconPathExpression);
+  patched = applyLinuxSingleInstancePatch(patched);
+  return patched;
 }
 
-const menuNeedle = "process.platform===`win32`&&D.removeMenu(),";
-const menuPatch = "process.platform===`linux`&&D.setMenuBarVisibility(!1),";
-const menuReplacement = `${menuPatch}${menuNeedle}`;
-
-if (source.includes(menuNeedle) && !source.includes(menuPatch)) {
-  source = source.replace(menuNeedle, menuReplacement);
-} else if (!source.includes(menuPatch)) {
-  console.warn("WARN: Could not find window menu visibility snippet — skipping menu patch");
-}
-
-const setIconNeedle =
-  ")}),D.once(`ready-to-show`,()=>{";
-const setIconPatch =
-  `)}),process.platform===\`linux\`&&D.setIcon(${iconPathExpression}),D.once(\`ready-to-show\`,()=>{`;
-
-if (source.includes(setIconNeedle) && !source.includes("&&D.setIcon(")) {
-  source = source.replace(setIconNeedle, setIconPatch);
-} else if (!source.includes("&&D.setIcon(")) {
-  console.warn("WARN: Could not find window setIcon insertion point — skipping setIcon patch");
-}
-
-// Patch 4: Replace transparent BrowserWindow background with opaque colors on Linux.
-// On macOS vibrancy handles transparency; on Linux there is no compositor equivalent,
-// so the transparent background causes flickering when the window moves or on hover.
-const colorConstRegex = /([A-Za-z_$][\w$]*)=`#00000000`,([A-Za-z_$][\w$]*)=`#000000`,([A-Za-z_$][\w$]*)=`#f9f9f9`/;
-const colorMatch = source.match(colorConstRegex);
-
-if (colorMatch) {
-  const [, transparentVar, darkVar, lightVar] = colorMatch;
-
-  // Capture the prefersDarkColors parameter name from the background function signature.
-  const funcParamRegex = /prefersDarkColors:([A-Za-z_$][\w$]*)\}\)\{return\s*([A-Za-z_$][\w$]*)===`win32`/;
-  const funcMatch = source.match(funcParamRegex);
-
-  if (funcMatch) {
-    const darkColorsParam = funcMatch[1];
-
-    const bgNeedle =
-      `backgroundMaterial:\`mica\`}:{backgroundColor:${transparentVar},backgroundMaterial:null}}`;
-    const bgReplacement =
-      `backgroundMaterial:\`mica\`}:process.platform===\`linux\`?{backgroundColor:${darkColorsParam}?${darkVar}:${lightVar},backgroundMaterial:null}:{backgroundColor:${transparentVar},backgroundMaterial:null}}`;
-
-    if (source.includes(bgNeedle)) {
-      source = source.replace(bgNeedle, bgReplacement);
-    } else {
-      console.warn("WARN: Could not find BrowserWindow background color needle — skipping background patch");
-    }
-  } else {
-    console.warn("WARN: Could not find prefersDarkColors parameter — skipping background patch");
+function patchPackageJson(extractedDir) {
+  const packageJsonPath = path.join(extractedDir, "package.json");
+  if (!fs.existsSync(packageJsonPath)) {
+    return null;
   }
-} else {
-  console.warn("WARN: Could not find color constants (#00000000, #000000, #f9f9f9) — skipping background patch");
+
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+  if (packageJson.desktopName !== "codex-desktop.desktop") {
+    packageJson.desktopName = "codex-desktop.desktop";
+    fs.writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`, "utf8");
+  }
+  return packageJson.desktopName;
 }
 
-source = applyLinuxFileManagerPatch(source);
-source = applyLinuxTrayPatch(source, iconPathExpression);
-source = applyLinuxSingleInstancePatch(source);
+function patchExtractedApp(extractedDir) {
+  const main = findMainBundle(extractedDir);
+  if (main == null) {
+    console.warn(
+      `WARN: Could not find main bundle in ${path.join(extractedDir, ".vite", "build")} — skipping main-process UI patches`,
+    );
+  }
 
-fs.writeFileSync(target, source, "utf8");
+  const iconAsset = findIconAsset(extractedDir);
+  if (iconAsset == null) {
+    console.warn(
+      `WARN: Could not find app icon asset in ${path.join(extractedDir, "webview", "assets")} — skipping icon patches`,
+    );
+  }
 
-patchAssetFiles(
-  /^code-theme-.*\.js$/,
-  applyLinuxOpaqueWindowsDefaultPatch,
-  `WARN: Could not find code theme bundle in ${webviewAssetsDir} — skipping translucent sidebar default patch`,
-);
-patchAssetFiles(
-  /^general-settings-.*\.js$/,
-  applyLinuxOpaqueWindowsDefaultPatch,
-  `WARN: Could not find general settings bundle in ${webviewAssetsDir} — skipping translucent sidebar default patch`,
-);
-patchAssetFiles(
-  /^index-.*\.js$/,
-  applyLinuxOpaqueWindowsDefaultPatch,
-  `WARN: Could not find webview index bundle in ${webviewAssetsDir} — skipping translucent sidebar default patch`,
-);
-patchAssetFiles(
-  /^use-resolved-theme-variant-.*\.js$/,
-  applyLinuxOpaqueWindowsDefaultPatch,
-  `WARN: Could not find resolved theme bundle in ${webviewAssetsDir} — skipping translucent sidebar default patch`,
-);
+  if (main != null) {
+    const target = path.join(main.buildDir, main.mainBundle);
+    const source = fs.readFileSync(target, "utf8");
+    const patchedSource = patchMainBundleSource(source, iconAsset);
+    if (patchedSource !== source) {
+      fs.writeFileSync(target, patchedSource, "utf8");
+    }
+  }
 
-if (packageJson.desktopName !== "codex-desktop.desktop") {
-  packageJson.desktopName = "codex-desktop.desktop";
-  fs.writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`, "utf8");
+  patchAssetFiles(
+    extractedDir,
+    /^code-theme-.*\.js$/,
+    applyLinuxOpaqueWindowsDefaultPatch,
+    `WARN: Could not find code theme bundle in ${path.join(
+      extractedDir,
+      "webview",
+      "assets",
+    )} — skipping translucent sidebar default patch`,
+  );
+  patchAssetFiles(
+    extractedDir,
+    /^general-settings-.*\.js$/,
+    applyLinuxOpaqueWindowsDefaultPatch,
+    `WARN: Could not find general settings bundle in ${path.join(
+      extractedDir,
+      "webview",
+      "assets",
+    )} — skipping translucent sidebar default patch`,
+  );
+  patchAssetFiles(
+    extractedDir,
+    /^index-.*\.js$/,
+    applyLinuxOpaqueWindowsDefaultPatch,
+    `WARN: Could not find webview index bundle in ${path.join(
+      extractedDir,
+      "webview",
+      "assets",
+    )} — skipping translucent sidebar default patch`,
+  );
+  patchAssetFiles(
+    extractedDir,
+    /^use-resolved-theme-variant-.*\.js$/,
+    applyLinuxOpaqueWindowsDefaultPatch,
+    `WARN: Could not find resolved theme bundle in ${path.join(
+      extractedDir,
+      "webview",
+      "assets",
+    )} — skipping translucent sidebar default patch`,
+  );
+
+  const desktopName = patchPackageJson(extractedDir);
+  console.log("Patched Linux window, shell, and appearance behavior:", {
+    target: main == null ? null : path.join(main.buildDir, main.mainBundle),
+    mainBundle: main?.mainBundle ?? null,
+    iconAsset,
+    desktopName,
+  });
 }
 
-console.log("Patched Linux window, shell, tray, and appearance behavior:", {
-  target,
-  mainBundle,
-  iconAsset,
-  desktopName: packageJson.desktopName,
-});
+function main() {
+  const extractedDir = process.argv[2];
+
+  if (!extractedDir) {
+    console.error("Usage: patch-linux-window-ui.js <extracted-app-asar-dir>");
+    process.exit(1);
+  }
+
+  patchExtractedApp(extractedDir);
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  applyLinuxFileManagerPatch,
+  applyLinuxMenuPatch,
+  applyLinuxOpaqueBackgroundPatch,
+  applyLinuxOpaqueWindowsDefaultPatch,
+  applyLinuxSetIconPatch,
+  applyLinuxSingleInstancePatch,
+  applyLinuxTrayPatch,
+  applyLinuxWindowOptionsPatch,
+  patchExtractedApp,
+  patchMainBundleSource,
+};

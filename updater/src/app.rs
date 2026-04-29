@@ -388,6 +388,10 @@ async fn reconcile_pending_install(
 ) -> Result<()> {
     sync_runtime_state(config, state);
     recover_interrupted_install(state, paths)?;
+    if complete_pending_install_if_already_installed(state, paths)? {
+        let _ = maybe_notify_installed(state, paths, config.notifications);
+        return Ok(());
+    }
 
     match state.status {
         UpdateStatus::ReadyToInstall | UpdateStatus::WaitingForAppExit => {
@@ -408,6 +412,7 @@ async fn reconcile_pending_install(
             }
 
             if liveness::is_app_running(config)? {
+                clear_install_auth_required_event(state, paths)?;
                 set_status(state, paths, UpdateStatus::WaitingForAppExit)?;
                 maybe_notify(
                     state,
@@ -417,6 +422,10 @@ async fn reconcile_pending_install(
                     "Codex Desktop update ready",
                     "An update is ready and will install after you close Codex Desktop.",
                 )?;
+                return Ok(());
+            }
+
+            if install_auth_retry_is_blocked(state) {
                 return Ok(());
             }
 
@@ -431,6 +440,32 @@ async fn reconcile_pending_install(
     }
 
     Ok(())
+}
+
+fn complete_pending_install_if_already_installed(
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+) -> Result<bool> {
+    if !matches!(
+        state.status,
+        UpdateStatus::ReadyToInstall | UpdateStatus::WaitingForAppExit
+    ) {
+        return Ok(false);
+    }
+
+    if !state.candidate_version.as_deref().is_some_and(|candidate| {
+        installed_version_matches_candidate(&state.installed_version, candidate)
+    }) {
+        return Ok(false);
+    }
+
+    state.status = UpdateStatus::Installed;
+    state.candidate_version = None;
+    state.error_message = None;
+    state.notified_events.clear();
+    persist_state(paths, state)?;
+    info!("recovered pending install state because the candidate version is already installed");
+    Ok(true)
 }
 
 fn recover_interrupted_install(state: &mut PersistedState, paths: &RuntimePaths) -> Result<()> {
@@ -487,6 +522,18 @@ fn installed_version_satisfies_candidate(installed: &str, candidate: &str) -> bo
     match compare_generated_versions(installed, candidate) {
         Some(std::cmp::Ordering::Less) => false,
         Some(_) => true,
+        None => installed == candidate,
+    }
+}
+
+fn installed_version_matches_candidate(installed: &str, candidate: &str) -> bool {
+    if installed == "unknown" {
+        return false;
+    }
+
+    match compare_generated_versions(installed, candidate) {
+        Some(std::cmp::Ordering::Equal) => true,
+        Some(_) => false,
         None => installed == candidate,
     }
 }
@@ -655,12 +702,69 @@ async fn trigger_install(
     }
 
     let error = anyhow::anyhow!(message);
+    if pkexec_authentication_was_not_obtained(&status) {
+        defer_install_until_next_app_exit(state, paths, error.to_string())?;
+        return Err(error);
+    }
+
     mark_failed_and_persist(state, paths, error.to_string())?;
     let _ = notify::send(
         "Codex update failed",
         "The package could not be installed. Check the updater log for details.",
     );
     Err(error)
+}
+
+fn pkexec_authentication_was_not_obtained(status: &std::process::ExitStatus) -> bool {
+    matches!(status.code(), Some(126 | 127))
+}
+
+fn install_auth_required_event_key(state: &PersistedState) -> Option<String> {
+    state
+        .candidate_version
+        .as_deref()
+        .map(|candidate| format!("install_auth_required:{candidate}"))
+}
+
+fn install_auth_retry_is_blocked(state: &PersistedState) -> bool {
+    install_auth_required_event_key(state)
+        .as_ref()
+        .is_some_and(|event_key| state.notified_events.contains(event_key))
+}
+
+fn clear_install_auth_required_event(
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+) -> Result<()> {
+    let Some(event_key) = install_auth_required_event_key(state) else {
+        return Ok(());
+    };
+
+    if state.notified_events.remove(&event_key) {
+        persist_state(paths, state)?;
+    }
+
+    Ok(())
+}
+
+fn defer_install_until_next_app_exit(
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    message: String,
+) -> Result<()> {
+    state.status = UpdateStatus::ReadyToInstall;
+    state.error_message = Some(message);
+
+    if let Some(event_key) = install_auth_required_event_key(state) {
+        if state.notified_events.insert(event_key) {
+            let _ = notify::send(
+                "Codex update needs permission",
+                "The ready update will retry after the next app close. Approve the system authentication dialog to install it.",
+            );
+        }
+    }
+
+    persist_state(paths, state)
 }
 
 fn notify_failure(
@@ -924,6 +1028,104 @@ mod tests {
 
         assert_eq!(state.status, UpdateStatus::ReadyToInstall);
         assert_eq!(state.error_message, None);
+        Ok(())
+    }
+
+    #[test]
+    fn pkexec_authentication_failures_are_retryable() -> Result<()> {
+        for code in [126, 127] {
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("exit {code}"))
+                .status()?;
+            assert!(pkexec_authentication_was_not_obtained(&status));
+        }
+
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 1")
+            .status()?;
+        assert!(!pkexec_authentication_was_not_obtained(&status));
+        Ok(())
+    }
+
+    #[test]
+    fn install_auth_retry_block_is_scoped_to_candidate() {
+        let mut state = PersistedState::new(true);
+        state.candidate_version = Some("2026.04.28.082247+abcdef12".to_string());
+
+        assert!(!install_auth_retry_is_blocked(&state));
+
+        state
+            .notified_events
+            .insert("install_auth_required:2026.04.28.082247+abcdef12".to_string());
+        assert!(install_auth_retry_is_blocked(&state));
+
+        state.candidate_version = Some("2026.04.29.010203+abcdef12".to_string());
+        assert!(!install_auth_retry_is_blocked(&state));
+    }
+
+    #[test]
+    fn clear_install_auth_required_event_keeps_unrelated_notifications() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let paths = RuntimePaths {
+            config_file: temp.path().join("config/config.toml"),
+            state_file: temp.path().join("state/state.json"),
+            log_file: temp.path().join("state/service.log"),
+            cache_dir: temp.path().join("cache"),
+            state_dir: temp.path().join("state"),
+            config_dir: temp.path().join("config"),
+        };
+        paths.ensure_dirs()?;
+
+        let mut state = PersistedState::new(true);
+        state.candidate_version = Some("2026.04.28.082247+abcdef12".to_string());
+        state
+            .notified_events
+            .insert("install_auth_required:2026.04.28.082247+abcdef12".to_string());
+        state
+            .notified_events
+            .insert("installed:2026.04.25.054929+12345678".to_string());
+
+        clear_install_auth_required_event(&mut state, &paths)?;
+
+        assert!(!install_auth_retry_is_blocked(&state));
+        assert!(state
+            .notified_events
+            .contains("installed:2026.04.25.054929+12345678"));
+        Ok(())
+    }
+
+    #[test]
+    fn pending_install_becomes_installed_when_candidate_is_already_present() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let paths = RuntimePaths {
+            config_file: temp.path().join("config/config.toml"),
+            state_file: temp.path().join("state/state.json"),
+            log_file: temp.path().join("state/service.log"),
+            cache_dir: temp.path().join("cache"),
+            state_dir: temp.path().join("state"),
+            config_dir: temp.path().join("config"),
+        };
+        paths.ensure_dirs()?;
+
+        let mut state = PersistedState::new(true);
+        state.status = UpdateStatus::ReadyToInstall;
+        state.installed_version = "2026.04.28.082247-abcdef12.fc43".to_string();
+        state.candidate_version = Some("2026.04.28.082247+abcdef12".to_string());
+        state.error_message = Some("authentication was not obtained".to_string());
+        state
+            .notified_events
+            .insert("install_auth_required:2026.04.28.082247+abcdef12".to_string());
+
+        assert!(complete_pending_install_if_already_installed(
+            &mut state, &paths
+        )?);
+
+        assert_eq!(state.status, UpdateStatus::Installed);
+        assert_eq!(state.candidate_version, None);
+        assert_eq!(state.error_message, None);
+        assert!(state.notified_events.is_empty());
         Ok(())
     }
 
