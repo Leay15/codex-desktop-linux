@@ -290,6 +290,58 @@ test_launcher_template_sanity() {
     assert_contains "$REPO_DIR/install.sh" "discover_webview_server_pid"
     assert_contains "$REPO_DIR/install.sh" "Adopted existing webview server"
     assert_contains "$REPO_DIR/install.sh" "detect_warm_start"
+    assert_contains "$REPO_DIR/install.sh" "send_warm_start_launch_action"
+    assert_contains "$REPO_DIR/install.sh" "CODEX_DESKTOP_LAUNCH_ACTION_SOCKET"
+    assert_contains "$REPO_DIR/install.sh" "APP_SETTINGS_FILE"
+    assert_contains "$REPO_DIR/install.sh" "linux_setting_enabled"
+    assert_contains "$REPO_DIR/install.sh" "codex-linux-warm-start-enabled"
+    assert_contains "$REPO_DIR/install.sh" "ADOPTED_WEBVIEW_PID"
+    assert_contains "$REPO_DIR/install.sh" "Reusing webview server pid="
+    python3 - "$REPO_DIR/install.sh" <<'PY'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+detect_body = source.split("detect_warm_start() {", 1)[1].split("send_warm_start_launch_action() {", 1)[0]
+launch_body = source.split("launch_electron() {", 1)[1].split("load_packaged_runtime_helper", 1)[0]
+runtime_body = source.split("trap cleanup_launcher EXIT", 1)[1].split("launch_electron", 1)[0]
+stop_body = source.split("stop_owned_webview_server() {", 1)[1].split("owned_webview_server_pid() {", 1)[0]
+adopt_body = source.split("adopt_existing_webview_server() {", 1)[1].split("ensure_webview_server() {", 1)[0]
+ensure_body = source.split("ensure_webview_server() {", 1)[1].split("wait_for_webview_server", 1)[0]
+if 'if RUNNING_APP_PID="$(find_running_app_pid)"; then' not in detect_body:
+    raise SystemExit("detect_warm_start must record a running app even when warm start is disabled")
+if not re.search(r'if ! linux_setting_enabled "codex-linux-warm-start-enabled" 1; then.*?return 0', detect_body, re.S):
+    raise SystemExit("detect_warm_start must not fail when warm start is disabled")
+if "preserving liveness marker for second-instance handoff" not in detect_body:
+    raise SystemExit("detect_warm_start must preserve the live app liveness marker")
+if 'pid_matches_executable "$RUNNING_APP_PID" "$SCRIPT_DIR/electron"' not in launch_body:
+    raise SystemExit("launch_electron must not overwrite APP_PID_FILE for second-instance handoff")
+if 'echo "$ELECTRON_PID" > "$APP_PID_FILE"' not in launch_body:
+    raise SystemExit("launch_electron must still write APP_PID_FILE for normal cold launches")
+if "using_second_instance_handoff" not in source or "needs_cold_start" not in source:
+    raise SystemExit("launcher must have an explicit second-instance handoff mode")
+if "second_instance_handoff_ready" not in runtime_body:
+    raise SystemExit("second-instance handoff must skip cold-start setup")
+if 'if needs_cold_start && [ -z "${CODEX_CLI_PATH:-}" ]; then' not in runtime_body:
+    raise SystemExit("second-instance handoff must skip CLI lookup")
+if 'if needs_cold_start && [ -z "$CODEX_CLI_PATH" ]; then' not in runtime_body:
+    raise SystemExit("second-instance handoff must skip missing-CLI failure")
+if "if needs_cold_start;" not in runtime_body:
+    raise SystemExit("second-instance handoff must skip CLI preflight")
+if "running_app_is_active" not in stop_body or "Preserving webview server" not in stop_body:
+    raise SystemExit("stop_owned_webview_server must not stop the live app webview server")
+if 'ADOPTED_WEBVIEW_PID="$pid"' not in adopt_body:
+    raise SystemExit("adopt_existing_webview_server must not mark a running app server as started by this launcher")
+if 'STARTED_WEBVIEW_PID="$pid"' not in adopt_body:
+    raise SystemExit("adopt_existing_webview_server must still own orphaned servers when no live app is running")
+if "running_app_is_active" not in adopt_body:
+    raise SystemExit("adopt_existing_webview_server must detect live-app reuse before cleanup")
+if "if adopt_existing_webview_server; then" not in ensure_body:
+    raise SystemExit("ensure_webview_server must split adoption from origin verification")
+if "Keeping the live app untouched" not in ensure_body:
+    raise SystemExit("ensure_webview_server must not stop a live app server when validation fails")
+PY
+    assert_contains "$REPO_DIR/install.sh" "warm_start_ipc_sent"
     assert_contains "$REPO_DIR/install.sh" "launcher_phase"
     assert_contains "$REPO_DIR/install.sh" "CODEX_SYNC_CLI_PREFLIGHT"
     assert_contains "$REPO_DIR/install.sh" "wait_for_webview_server"
@@ -300,6 +352,10 @@ test_launcher_template_sanity() {
     assert_contains "$REPO_DIR/install.sh" "--ozone-platform-hint=auto"
     assert_contains "$REPO_DIR/install.sh" "--disable-gpu-sandbox"
     assert_contains "$REPO_DIR/install.sh" "PACKAGED_RUNTIME_HELPER"
+    assert_contains "$REPO_DIR/install.sh" "CODEX_INSTALL_ALLOW_RUNNING"
+    assert_contains "$REPO_DIR/install.sh" "assert_install_target_not_running"
+    assert_contains "$REPO_DIR/install.sh" "find_running_install_target_pid"
+    assert_contains "$REPO_DIR/install.sh" "Codex Desktop is currently running from"
     assert_contains "$REPO_DIR/install.sh" "prompt_install_missing_cli"
     assert_contains "$REPO_DIR/install.sh" "Install it now? \\[Y/n\\]"
     assert_contains "$REPO_DIR/install.sh" "is_interactive_terminal"
@@ -329,6 +385,14 @@ make_fake_extracted_asar() {
 
     mkdir -p "$root/webview/assets" "$root/.vite/build"
     printf 'png' > "$root/webview/assets/app-test.png"
+    printf 'export{s as t};\n' > "$root/webview/assets/chunk-test.js"
+    printf 'import{t as e}from"./chunk-test.js";Symbol.for(`react.transitional.element`);export{e as t};\n' > "$root/webview/assets/react-test.js"
+    printf 'import{t as e}from"./chunk-test.js";Symbol.for(`react.transitional.element`);export{e as t};\n' > "$root/webview/assets/jsx-runtime-test.js"
+    printf 'let marker=`vscode://codex`;async function n(){return{}}export{n};\n' > "$root/webview/assets/vscode-api-test.js"
+    printf 'let marker=`hotkey-window-hotkey-state`;function i(){}export{i};\n' > "$root/webview/assets/general-settings-hotkey-test.js"
+    printf 'function t(){}export{t};\n' > "$root/webview/assets/toggle-test.js"
+    printf 'function n(){}export{n};\n' > "$root/webview/assets/settings-row-test.js"
+    printf 'function r(){}function n(){}function t(){}export{r,n,t};\n' > "$root/webview/assets/settings-content-layout-test.js"
     if [ -n "$settings_body" ]; then
         printf '%s\n' "$settings_body" > "$root/webview/assets/general-settings-test.js"
     fi
@@ -429,7 +493,7 @@ JS
     assert_contains "$extracted/.vite/build/main-test.js" 'let e=process.platform===`linux`&&this.setLinuxTrayContextMenu?this.setLinuxTrayContextMenu():n.Menu.buildFromTemplate'
     assert_contains "$extracted/.vite/build/main-test.js" 'if(process.platform===`linux`)return;e.once(`menu-will-show`'
     assert_contains "$extracted/.vite/build/main-test.js" 'this.trayMenuThreads=e.trayMenuThreads,process.platform===`linux`&&this.setLinuxTrayContextMenu?.()'
-    assert_contains "$extracted/.vite/build/main-test.js" '(E||process.platform===`linux`)&&oe();'
+    assert_contains "$extracted/.vite/build/main-test.js" '(E||process.platform===`linux`&&codexLinuxIsTrayEnabled())&&oe();'
     assert_not_contains "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&this.tray.setContextMenu?.(e),this.tray.popUpContextMenu(e)'
     assert_not_contains "$output_log" 'WARN: Could not find tray'
 
@@ -443,7 +507,162 @@ JS
     assert_occurrence_count "$extracted/.vite/build/main-test.js" 'let e=process.platform===`linux`&&this.setLinuxTrayContextMenu?this.setLinuxTrayContextMenu():n.Menu.buildFromTemplate' '1'
     assert_occurrence_count "$extracted/.vite/build/main-test.js" 'if(process.platform===`linux`)return;e.once(`menu-will-show`' '1'
     assert_occurrence_count "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&this.setLinuxTrayContextMenu?.()' '1'
-    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'process.platform===`linux`)&&oe' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&codexLinuxIsTrayEnabled())&&oe' '1'
+}
+
+test_keybinds_settings_tab_patch_smoke() {
+    info "Checking Keybinds settings tab patch behavior"
+    local workspace="$TMP_DIR/keybinds-settings-patch"
+    local extracted="$workspace/extracted"
+    local output_log="$workspace/output.log"
+
+    mkdir -p "$workspace"
+    make_fake_extracted_asar "$extracted" 'let D={removeMenu(){},setMenuBarVisibility(){},setIcon(){},once(){}};let t={join(){}};let a={existsSync(){return true},statSync(){return {isFile(){return false}}}};let n={shell:{openPath(){return ""},showItemInFolder(){}}};...process.platform===`win32`?{autoHideMenuBar:!0}:{},process.platform===`win32`&&D.removeMenu(),foo)}),D.once(`ready-to-show`,()=>{var sa=Mi({id:`fileManager`,label:`Finder`,icon:`apps/finder.png`,kind:`fileManager`,darwin:{detect:()=>`open`,args:e=>ai(e)},win32:{label:`File Explorer`,icon:`apps/file-explorer.png`,detect:ca,args:e=>ai(e),open:async({path:e})=>la(e)}});function ca(){let e=1;return e}async function la(e){let t=ua(e);if(t&&(0,a.statSync)(t).isFile()){n.shell.showItemInFolder(t);return}let r=t??e,i=await n.shell.openPath(r);if(i)throw Error(i)}function ua(e){return e}var Ua=Mi({id:`systemDefault`,label:`System Default App`,icon:`apps/file-explorer.png`,kind:`systemDefault`,hidden:!0,darwin:{icon:`apps/finder.png`,detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)},win32:{detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)},linux:{detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)}});async function Wa(e){return e}'
+
+    cat > "$extracted/webview/assets/settings-sections-test.js" <<'JS'
+var e=`general-settings`,t=`mcp-settings`,n=[{slug:e},{slug:`appearance`},{slug:`git-settings`},{slug:`connections`},{slug:`local-environments`},{slug:`worktrees`},{slug:`agent`},{slug:`personalization`},{slug:`usage`},{slug:`browser-use`},{slug:`computer-use`},{slug:t},{slug:`plugins-settings`},{slug:`skills-settings`},{slug:`data-controls`}],r=t;export{n,t as r,e as t};
+JS
+    cat > "$extracted/webview/assets/settings-shared-test.js" <<'JS'
+import{t as d}from"./jsx-runtime-ebkFq_df.js";var c={"general-settings":{id:`settings.nav.general-settings`,defaultMessage:`General`,description:`Title for general settings section`},appearance:{id:`settings.nav.appearance`,defaultMessage:`Appearance`,description:`Title for appearance settings section`}};function m(e){let t=(0,u.c)(17),{slug:r}=e;switch(r){case`appearance`:{let e;return t[1]===Symbol.for(`react.memo_cache_sentinel`)?(e=(0,d.jsx)(n,{id:`settings.section.appearance`,defaultMessage:`Appearance`,description:`Title for appearance settings section`}),t[1]=e):e=t[1],e}case`general-settings`:{let e;return t[2]===Symbol.for(`react.memo_cache_sentinel`)?(e=(0,d.jsx)(n,{id:`settings.section.general-settings`,defaultMessage:`General`,description:`Title for general settings section`}),t[2]=e):e=t[2],e}}}
+JS
+    cat > "$extracted/webview/assets/index-test.js" <<'JS'
+var Xge={"general-settings":xh,appearance:Pf,agent:gU},H7={},Zge=[`general-settings`,`appearance`,`agent`,`personalization`,`mcp-settings`,`connections`,`git-settings`,`local-environments`,`worktrees`,`browser-use`,`computer-use`,`data-controls`],Qge=[{key:`app`,heading:H7.appHeading,slugs:[`general-settings`,`appearance`,`connections`,`git-settings`,`usage`]}];function n_e(){let l=`electron`,e=e=>{switch(e.slug){case`appearance`:case`git-settings`:case`worktrees`:case`local-environments`:case`data-controls`:case`environments`:return l===`electron`;case`account`:case`general-settings`:case`agent`:case`personalization`:case`mcp-settings`:return!0}};if(O)bb0:switch(D.slug){case`usage`:k=g;break bb0;case`appearance`:case`general-settings`:case`agent`:case`git-settings`:case`account`:case`data-controls`:case`personalization`:k=!1;break bb0;}}function s_e(e){let{slug:n}=e,r=c_e[n];return (0,$.jsx)(r,{})}var c_e={"general-settings":(0,Z.lazy)(()=>s(()=>import(`./general-settings-DZbwMmWz.js`).then(e=>({default:e.GeneralSettings})),__vite__mapDeps([4]),import.meta.url)),appearance:(0,Z.lazy)(()=>s(()=>import(`./appearance-settings-D4xYjo5o.js`).then(e=>({default:e.AppearanceSettings})),__vite__mapDeps([56]),import.meta.url)),agent:(0,Z.lazy)(()=>Promise.resolve({default:l_e}))};
+JS
+
+    node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
+    assert_file_exists "$extracted/webview/assets/keybinds-settings-linux.js"
+    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "function KeybindsSettings"
+    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "HotkeyWindowHotkeyRow"
+    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "DEFAULT_SHORTCUTS"
+    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "codex-linux-keybind-overrides"
+    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "function ShortcutInput"
+    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "data-codex-keybind-input"
+    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "newThread"
+    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "openFolder"
+    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "toggleTerminal"
+    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "toggleDiffPanel"
+    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "thread9"
+    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "codex-linux-system-tray-enabled"
+    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "codex-linux-warm-start-enabled"
+    assert_contains "$extracted/webview/assets/keybinds-settings-linux.js" "codex-linux-prompt-window-enabled"
+    assert_contains "$extracted/webview/assets/settings-sections-test.js" 'slug:`keybinds`'
+    assert_contains "$extracted/webview/assets/settings-shared-test.js" "settings.nav.keybinds"
+    assert_contains "$extracted/webview/assets/settings-shared-test.js" "settings.section.keybinds"
+    assert_contains "$extracted/webview/assets/index-test.js" "keybinds-settings-linux.js"
+    assert_contains "$extracted/webview/assets/index-test.js" "keybinds:xh"
+    assert_contains "$extracted/webview/assets/index-test.js" 'Zge=\[`general-settings`,`keybinds`'
+    assert_contains "$extracted/webview/assets/index-test.js" 'slugs:\[`general-settings`,`keybinds`'
+    assert_contains "$extracted/webview/assets/index-test.js" 'case`keybinds`:return l===`electron`'
+    assert_contains "$extracted/webview/assets/index-test.js" "codexLinuxKeybindOverridesRuntime"
+    assert_contains "$extracted/webview/assets/index-test.js" "codex-linux-keybind-overrides"
+    assert_contains "$extracted/webview/assets/index-test.js" "go-to-thread-index"
+    assert_contains "$extracted/webview/assets/index-test.js" "newThreadAlt"
+    assert_contains "$extracted/webview/assets/index-test.js" "new-chat"
+    assert_contains "$extracted/webview/assets/index-test.js" "toggle-terminal"
+    assert_contains "$extracted/webview/assets/index-test.js" "toggle-diff-panel"
+    assert_contains "$extracted/webview/assets/index-test.js" "isShortcutCaptureTarget"
+    assert_contains "$extracted/webview/assets/index-test.js" "data-codex-keybind-input"
+    assert_not_contains "$extracted/webview/assets/index-test.js" "isEditableTarget(event))return"
+    assert_not_contains "$extracted/webview/assets/index-test.js" "ac(id)"
+
+    node - "$extracted/webview/assets/index-test.js" <<'NODE'
+const fs = require("fs");
+const vm = require("vm");
+const file = process.argv[2];
+const source = fs.readFileSync(file, "utf8");
+const marker = ";function codexLinuxKeybindOverridesRuntime()";
+const start = source.indexOf(marker);
+if (start === -1) throw new Error("missing runtime patch");
+const runtime = source
+  .slice(start)
+  .replace("codexLinuxKeybindOverridesRuntime();", "globalThis.codexLinuxKeybindOverridesRuntime=codexLinuxKeybindOverridesRuntime;");
+const listeners = {};
+const calls = [];
+class FakeElement {
+  constructor(isKeybindInput = false) {
+    this.isKeybindInput = isKeybindInput;
+  }
+  closest(selector) {
+    return selector === "[data-codex-keybind-input]" && this.isKeybindInput ? this : null;
+  }
+}
+const context = {
+  window: { addEventListener: (event, fn) => (listeners[event] ??= []).push(fn) },
+  Element: FakeElement,
+  navigator: { platform: "Linux x86_64" },
+  localStorage: { getItem: () => JSON.stringify({ toggleFileTreePanel: "Ctrl+E" }) },
+  Ct: { toggleFileTreePanel: "Command+Shift+E" },
+  E: {
+    dispatchHostMessage: (message) => calls.push(message),
+    dispatchMessage: () => {},
+  },
+  globalThis: null,
+};
+context.globalThis = context;
+vm.runInNewContext(runtime, context);
+context.codexLinuxKeybindOverridesRuntime();
+const makeEvent = (target) => ({
+  defaultPrevented: false,
+  repeat: false,
+  target,
+  ctrlKey: true,
+  altKey: false,
+  shiftKey: false,
+  metaKey: false,
+  key: "e",
+  preventDefault() {
+    this.defaultPrevented = true;
+  },
+  stopPropagation() {
+    this.stopped = true;
+  },
+});
+const composerEvent = makeEvent(new FakeElement(false));
+listeners.keydown[0](composerEvent);
+if (calls.length !== 1 || calls[0].type !== "toggle-file-tree-panel" || !composerEvent.defaultPrevented) {
+  throw new Error("Ctrl+E override did not dispatch from composer-like target");
+}
+const keybindInputEvent = makeEvent(new FakeElement(true));
+listeners.keydown[0](keybindInputEvent);
+if (calls.length !== 1 || keybindInputEvent.defaultPrevented) {
+  throw new Error("keybind capture input should not dispatch runtime override");
+}
+NODE
+
+    node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
+    assert_occurrence_count "$extracted/webview/assets/settings-sections-test.js" 'slug:`keybinds`' '1'
+    assert_occurrence_count "$extracted/webview/assets/settings-shared-test.js" "settings.nav.keybinds" '1'
+    assert_occurrence_count "$extracted/webview/assets/settings-shared-test.js" "settings.section.keybinds" '1'
+    assert_occurrence_count "$extracted/webview/assets/index-test.js" "keybinds-settings-linux.js" '1'
+    assert_occurrence_count "$extracted/webview/assets/index-test.js" "keybinds:xh" '1'
+    assert_occurrence_count "$extracted/webview/assets/index-test.js" "function codexLinuxKeybindOverridesRuntime" '1'
+}
+
+test_keybinds_settings_patch_warns_on_bundle_shape_miss() {
+    info "Checking Keybinds settings bundle-shape warning"
+    local workspace="$TMP_DIR/keybinds-settings-shape-warning"
+    local extracted="$workspace/extracted"
+    local output_log="$workspace/output.log"
+
+    mkdir -p "$workspace"
+    make_fake_extracted_asar "$extracted" 'let D={removeMenu(){},setMenuBarVisibility(){},setIcon(){},once(){}};let t={join(){}};let a={existsSync(){return true},statSync(){return {isFile(){return false}}}};let n={shell:{openPath(){return ""},showItemInFolder(){}}};...process.platform===`win32`?{autoHideMenuBar:!0}:{},process.platform===`win32`&&D.removeMenu(),foo)}),D.once(`ready-to-show`,()=>{var sa=Mi({id:`fileManager`,label:`Finder`,icon:`apps/finder.png`,kind:`fileManager`,darwin:{detect:()=>`open`,args:e=>ai(e)},win32:{label:`File Explorer`,icon:`apps/file-explorer.png`,detect:ca,args:e=>ai(e),open:async({path:e})=>la(e)}});function ca(){let e=1;return e}async function la(e){let t=ua(e);if(t&&(0,a.statSync)(t).isFile()){n.shell.showItemInFolder(t);return}let r=t??e,i=await n.shell.openPath(r);if(i)throw Error(i)}function ua(e){return e}var Ua=Mi({id:`systemDefault`,label:`System Default App`,icon:`apps/file-explorer.png`,kind:`systemDefault`,hidden:!0,darwin:{icon:`apps/finder.png`,detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)},win32:{detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)},linux:{detect:()=>`system-default`,iconPath:()=>null,args:e=>[e],open:async({path:e})=>Wa(e)}});async function Wa(e){return e}'
+    rm "$extracted/webview/assets/settings-row-test.js"
+    cat > "$extracted/webview/assets/settings-sections-test.js" <<'JS'
+var e=`general-settings`,t=`mcp-settings`,n=[{slug:e},{slug:`appearance`}],r=t;export{n,t as r,e as t};
+JS
+    cat > "$extracted/webview/assets/settings-shared-test.js" <<'JS'
+var c={"general-settings":{id:`settings.nav.general-settings`,defaultMessage:`General`,description:`Title for general settings section`}};function m(e){let t=(0,u.c)(17),{slug:r}=e;switch(r){case`general-settings`:{let e;return t[2]===Symbol.for(`react.memo_cache_sentinel`)?(e=(0,d.jsx)(n,{id:`settings.section.general-settings`,defaultMessage:`General`,description:`Title for general settings section`}),t[2]=e):e=t[2],e}}}
+JS
+    cat > "$extracted/webview/assets/index-test.js" <<'JS'
+var Xge={"general-settings":xh,appearance:Pf},H7={},Zge=[`general-settings`,`appearance`],Qge=[{key:`app`,heading:H7.appHeading,slugs:[`general-settings`,`appearance`,`connections`,`git-settings`,`usage`]}];function n_e(){let l=`electron`,e=e=>{switch(e.slug){case`appearance`:case`git-settings`:case`worktrees`:case`local-environments`:case`data-controls`:case`environments`:return l===`electron`;case`account`:case`general-settings`:return!0}};if(O)bb0:switch(D.slug){case`appearance`:case`general-settings`:k=!1;break bb0;}}var c_e={"general-settings":(0,Z.lazy)(()=>s(()=>import(`./general-settings-DZbwMmWz.js`).then(e=>({default:e.GeneralSettings})),__vite__mapDeps([4]),import.meta.url))};
+JS
+
+    node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
+    assert_contains "$output_log" "WARN: Keybinds settings patch skipped"
+    assert_contains "$output_log" "could not find settings row asset"
+    [ ! -f "$extracted/webview/assets/keybinds-settings-linux.js" ] || fail "Keybinds asset should not be written when bundle shape is missing"
+    assert_not_contains "$extracted/webview/assets/settings-sections-test.js" 'slug:`keybinds`'
+    assert_not_contains "$extracted/webview/assets/index-test.js" "keybinds-settings-linux.js"
 }
 
 test_browser_annotation_screenshot_patch_smoke() {
@@ -478,9 +697,11 @@ test_linux_single_instance_patch_smoke() {
 
     mkdir -p "$workspace"
     bundle_body="$(cat <<'JS'
-let n={app:{whenReady(){},quit(){},requestSingleInstanceLock(){},on(){},off(){}}};
-let t={Er(){return {info(){}}},jn:class{add(){}}};
-async function uT(){let k=new t.jn;t.Er().info(`Launching app`,{safe:{agentRunId:process.env.CODEX_ELECTRON_AGENT_RUN_ID?.trim()||null}});let A=Date.now();await n.app.whenReady();let R={deepLinks:{queueProcessArgs(){return false}}},P={hotkeyWindowLifecycleManager:{hide(){}},getPrimaryWindow(){return null},createFreshLocalWindow(){return null}},g={reportNonFatal(){}},l=()=>{},re=e=>{e.isMinimized()&&e.restore(),e.show(),e.focus()},ie=async()=>{try{P.hotkeyWindowLifecycleManager.hide();let e=P.getPrimaryWindow(`local`)??await P.createFreshLocalWindow(`/`);if(e==null)return;re(e)}catch(e){g.reportNonFatal(e instanceof Error?e:`Failed to open window on second instance`,{kind:`second-instance-open-window-failed`})}};l(e=>{R.deepLinks.queueProcessArgs(e)||ie()});let ae=async()=>{}}
+let S=globalThis.__codexSmoke;
+let n={app:{whenReady(){return Promise.resolve()},quit(){S.quitCount++},requestSingleInstanceLock(){S.lockCount++;return true},on(e,t){S.appHandlers[e]=t},off(e,t){S.offHandlers[e]=t}}};
+let t={Er(){return {info(){}}},jn:class{add(e){S.disposables.push(e)}}};
+let i={default:{dirname(e){S.dirnameCalls.push(e);return `/tmp`}}},o={mkdirSync(...e){S.mkdirSyncCalls.push(e)},rmSync(...e){S.rmSyncCalls.push(e)}},u={default:{createServer(e){S.createServerCalls++;S.socketConnectionHandler=e;return S.socketServer}}};
+async function uT(){let k=new t.jn;t.Er().info(`Launching app`,{safe:{agentRunId:process.env.CODEX_ELECTRON_AGENT_RUN_ID?.trim()||null}});let A=Date.now();await n.app.whenReady();let w=(...e)=>{S.traceCalls.push(e)},M={globalState:S.globalState,repoRoot:`/tmp/codex-smoke`},z=`local`,R={deepLinks:{queueProcessArgs(e){S.queueArgs.push(e);return Array.isArray(e)&&e.some(e=>{let t=String(e);return t.startsWith(`codex://`)||t.startsWith(`codex-browser-sidebar://`)})},flushPendingDeepLinks(){S.flushPendingDeepLinksCalls++;return Promise.resolve()}},navigateToRoute(e,t){S.navigateCalls.push({windowId:e.id,path:t})}},P={windowManager:{sendMessageToWindow(e,t){S.messages.push({windowId:e.id,message:t})}},hotkeyWindowLifecycleManager:{hide(){S.hideCalls++},show(){S.showCalls++;return S.hotkeyWindowShowResult},ensureHotkeyWindowController(){S.ensureHotkeyWindowControllerCalls++;return S.hotkeyWindowController}},getPrimaryWindow(){return S.primaryWindow},createFreshLocalWindow(e){S.createFreshLocalWindowCalls.push(e);return S.createdWindow},ensureHostWindow(e){S.ensureHostWindowCalls.push(e);return S.primaryWindow??S.createdWindow}},g={reportNonFatal(e,t){S.errors.push({error:String(e),meta:t})}},l=e=>{S.initialHandler=e},re=e=>{S.focusCalls.push(e.id);e.isMinimized()&&e.restore(),e.show(),e.focus()},ie=async()=>{S.ieCalls++;try{P.hotkeyWindowLifecycleManager.hide();let e=P.getPrimaryWindow(`local`)??await P.createFreshLocalWindow(`/`);if(e==null)return;re(e)}catch(e){g.reportNonFatal(e instanceof Error?e:`Failed to open window on second instance`,{kind:`second-instance-open-window-failed`})}};l(e=>{R.deepLinks.queueProcessArgs(e)||ie()});let ae=async(e,t)=>{P.hotkeyWindowLifecycleManager.hide();let n=P.getPrimaryWindow(z),r=n??await P.createFreshLocalWindow(e);r!=null&&(n!=null&&t.navigateExistingWindow&&R.navigateToRoute(r,e),re(r))},oe=async()=>{S.trayStartupCalls++};let E=process.platform===`win32`;E&&oe();let me=await P.ensureHostWindow(z);me&&re(me),w(`local window ensured`,A,{hostId:z,localWindowVisible:me?.isVisible()??!1}),A=Date.now(),await R.deepLinks.flushPendingDeepLinks()}
 JS
 )"
     make_fake_extracted_asar "$extracted" "$bundle_body"
@@ -488,10 +709,517 @@ JS
     node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
     assert_contains "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&!n.app.requestSingleInstanceLock()'
     assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxSecondInstanceHandler'
+    assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxHandleLaunchActionArgs'
+    assert_contains "$extracted/.vite/build/main-test.js" 'e.includes(`--new-chat`)'
+    assert_contains "$extracted/.vite/build/main-test.js" 'e.includes(`--quick-chat`)'
+    assert_contains "$extracted/.vite/build/main-test.js" 'e.includes(`--prompt-chat`)'
+    assert_contains "$extracted/.vite/build/main-test.js" 'e.includes(`--hotkey-window`)'
+    assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxHasDeepLink'
+    assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxShowHotkeyWindow'
+    assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxGetHotkeyWindowController'
+    assert_contains "$extracted/.vite/build/main-test.js" 'ensureHotkeyWindowController'
+    assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxPrewarmHotkeyWindow'
+    assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxStartLaunchActionSocket'
+    assert_contains "$extracted/.vite/build/main-test.js" 'CODEX_DESKTOP_LAUNCH_ACTION_SOCKET'
+    assert_contains "$extracted/.vite/build/main-test.js" 'e.openHome'
+    assert_contains "$extracted/.vite/build/main-test.js" 'e.prewarm'
+    assert_contains "$extracted/.vite/build/main-test.js" 'type:`new-quick-chat`'
+
+    node - "$extracted/.vite/build/main-test.js" <<'NODE'
+const fs = require("fs");
+const vm = require("vm");
+
+const source = fs.readFileSync(process.argv[2], "utf8");
+let state = makeState();
+
+function makeState(settings = {}) {
+  const next = {
+    appHandlers: Object.create(null),
+    offHandlers: Object.create(null),
+    disposables: [],
+    initialHandler: null,
+    lockCount: 0,
+    quitCount: 0,
+    globalStateGetKeys: [],
+    linuxSettings: {
+      promptChatEnabled: true,
+      warmStartEnabled: true,
+      trayEnabled: true,
+      ...settings,
+    },
+  };
+
+  next.globalState = {
+    get(key) {
+      next.globalStateGetKeys.push(String(key));
+      return linuxSettingForKey(next, key);
+    },
+  };
+
+  return next;
+}
+
+function linuxSettingsAtom(settings) {
+  return {
+    "settings.keybinds.promptChatEnabled": settings.promptChatEnabled,
+    "settings.keybinds.promptChat": settings.promptChatEnabled,
+    "settings.keybinds.hotkeyWindowEnabled": settings.promptChatEnabled,
+    "settings.keybinds.warmStartEnabled": settings.warmStartEnabled,
+    "settings.keybinds.warmStart": settings.warmStartEnabled,
+    "settings.keybinds.launchActionSocketEnabled": settings.warmStartEnabled,
+    "settings.keybinds.trayEnabled": settings.trayEnabled,
+    "settings.keybinds.tray": settings.trayEnabled,
+    "settings.linux.promptChatEnabled": settings.promptChatEnabled,
+    "settings.linux.warmStartEnabled": settings.warmStartEnabled,
+    "settings.linux.trayEnabled": settings.trayEnabled,
+  };
+}
+
+function linuxSettingForKey(next, key) {
+  const keyText = String(key).toLowerCase();
+  const settings = next.linuxSettings;
+
+  if (keyText.includes("persisted") || keyText === "electron-persisted-atom-state") {
+    return linuxSettingsAtom(settings);
+  }
+
+  if (keyText.includes("keybind") && !keyText.includes("prompt") && !keyText.includes("hotkey") && !keyText.includes("warm") && !keyText.includes("launch") && !keyText.includes("socket") && !keyText.includes("tray")) {
+    return {
+      promptChatEnabled: settings.promptChatEnabled,
+      hotkeyWindowEnabled: settings.promptChatEnabled,
+      warmStartEnabled: settings.warmStartEnabled,
+      launchActionSocketEnabled: settings.warmStartEnabled,
+      trayEnabled: settings.trayEnabled,
+    };
+  }
+
+  if (keyText.includes("prompt") || keyText.includes("hotkey")) {
+    return settings.promptChatEnabled;
+  }
+
+  if (keyText.includes("warm") || keyText.includes("socket") || keyText.includes("launch")) {
+    return settings.warmStartEnabled;
+  }
+
+  if (keyText.includes("tray")) {
+    return settings.trayEnabled;
+  }
+
+  return null;
+}
+
+function makeWindow(id) {
+  return {
+    id,
+    isMinimized() {
+      state.windowCalls.push(`${id}:isMinimized`);
+      return false;
+    },
+    isVisible() {
+      state.windowCalls.push(`${id}:isVisible`);
+      return true;
+    },
+    restore() {
+      state.windowCalls.push(`${id}:restore`);
+    },
+    show() {
+      state.windowCalls.push(`${id}:show`);
+    },
+    focus() {
+      state.windowCalls.push(`${id}:focus`);
+    },
+  };
+}
+
+function resetCalls() {
+  const existingCreateServerCalls = state.createServerCalls ?? 0;
+  const existingSocketConnectionHandler = state.socketConnectionHandler ?? null;
+  const existingSocketListenCalls = state.socketListenCalls ?? [];
+  const existingSocketServerHandlers = state.socketServerHandlers ?? Object.create(null);
+  state.queueArgs = [];
+  state.navigateCalls = [];
+  state.messages = [];
+  state.hideCalls = 0;
+  state.showCalls = 0;
+  state.controllerShowCalls = 0;
+  state.hotkeyWindowShowResult = true;
+  state.openHomeCalls = 0;
+  state.hotkeyWindowOpenHomeResult = undefined;
+  state.prewarmCalls = 0;
+  state.prewarmThrows = false;
+  state.ensureHotkeyWindowControllerCalls = 0;
+  state.hotkeyWindowController = {
+    show() {
+      state.controllerShowCalls++;
+      return state.hotkeyWindowShowResult;
+    },
+    openHome() {
+      state.openHomeCalls++;
+      return state.hotkeyWindowOpenHomeResult;
+    },
+    prewarm() {
+      state.prewarmCalls++;
+      if (state.prewarmThrows) {
+        throw new Error("prewarm failed");
+      }
+    },
+  };
+  state.ensureHostWindowCalls = [];
+  state.createFreshLocalWindowCalls = [];
+  state.focusCalls = [];
+  state.windowCalls = [];
+  state.errors = [];
+  state.ieCalls = 0;
+  state.traceCalls = [];
+  state.flushPendingDeepLinksCalls = 0;
+  state.trayStartupCalls = 0;
+  state.primaryWindow = null;
+  state.createdWindow = makeWindow("created");
+  state.dirnameCalls = [];
+  state.mkdirSyncCalls = [];
+  state.rmSyncCalls = [];
+  state.createServerCalls = existingCreateServerCalls;
+  state.socketConnectionHandler = existingSocketConnectionHandler;
+  state.socketListenCalls = existingSocketListenCalls;
+  state.socketCloseCalls = 0;
+  state.socketServer = {
+    listen(path) {
+      state.socketListenCalls.push(path);
+    },
+    close() {
+      state.socketCloseCalls += 1;
+    },
+    on(event, handler) {
+      state.socketServerHandlers[event] = handler;
+      return this;
+    },
+  };
+  state.socketServerHandlers = existingSocketServerHandlers;
+}
+
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+async function flushAsyncHandlers() {
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function boot(settings = {}, env = { CODEX_DESKTOP_LAUNCH_ACTION_SOCKET: "/tmp/codex-smoke.sock" }) {
+  state = makeState(settings);
+  resetCalls();
+  state.primary = makeWindow("primary");
+
+  const context = {
+    console,
+    process: { platform: "linux", env },
+    __codexSmoke: state,
+  };
+  context.globalThis = context;
+
+  vm.runInNewContext(`${source}\nglobalThis.__codexSmokeRun = uT;`, context, {
+    filename: "main-test.js",
+  });
+
+  await context.__codexSmokeRun();
+  return context;
+}
+
+(async () => {
+  await boot();
+  assert(typeof state.appHandlers["second-instance"] === "function", "second-instance handler was not registered");
+  assert(typeof state.initialHandler === "function", "initial argv handler was not registered");
+  assert(state.createServerCalls === 1, "warm-start launch action socket server was not created");
+  assert(state.socketListenCalls.length === 1 && state.socketListenCalls[0] === "/tmp/codex-smoke.sock", "warm-start launch action socket did not listen on the configured path");
+  assert(typeof state.socketConnectionHandler === "function", "warm-start launch action socket connection handler was not registered");
+  assert(state.mkdirSyncCalls.length === 1, "warm-start launch action socket should create its parent runtime directory");
+  assert(state.rmSyncCalls.length === 1 && state.rmSyncCalls[0][0] === "/tmp/codex-smoke.sock", "warm-start launch action socket should remove a stale socket before listening");
+  assert(state.prewarmCalls === 1, "startup should prewarm the compact hotkey prompt window");
+  assert(state.ensureHotkeyWindowControllerCalls === 1, "startup prewarm should use the real hotkey window controller");
+  assert(state.flushPendingDeepLinksCalls === 1, "startup should still flush pending deeplinks after prewarm");
+  assert(state.trayStartupCalls === 1, "startup should initialize the Linux tray when the tray gate is enabled");
+
+  async function runSecondInstance(args) {
+    state.appHandlers["second-instance"]({}, args);
+    await flushAsyncHandlers();
+  }
+
+  async function runInitialArgs(args) {
+    state.initialHandler(args);
+    await flushAsyncHandlers();
+  }
+
+  function makeSocket() {
+    const handlers = Object.create(null);
+    return {
+      destroyed: false,
+      encoding: null,
+      outputs: [],
+      setEncoding(encoding) {
+        this.encoding = encoding;
+      },
+      on(event, handler) {
+        handlers[event] = handler;
+        return this;
+      },
+      emit(event, payload) {
+        if (handlers[event]) {
+          handlers[event](payload);
+        }
+      },
+      end(output) {
+        this.outputs.push(output);
+      },
+      destroy() {
+        this.destroyed = true;
+      },
+    };
+  }
+
+  async function runSocketArgs(args) {
+    const socket = makeSocket();
+    state.socketConnectionHandler(socket);
+    socket.emit("data", `${JSON.stringify({ argv: args })}\n`);
+    await flushAsyncHandlers();
+    return socket;
+  }
+
+  resetCalls();
+  state.primaryWindow = state.primary;
+  await runSecondInstance(["codex-desktop", "--new-chat"]);
+  assert(state.queueArgs.length === 0, "--new-chat without a deeplink should not be consumed by deeplink routing");
+  assert(state.createFreshLocalWindowCalls.length === 0, "--new-chat should reuse the warm primary window");
+  assert(state.focusCalls.length === 1 && state.focusCalls[0] === "primary", "--new-chat should focus the warm primary window");
+  assert(state.navigateCalls.length === 1 && state.navigateCalls[0].path === "/", "--new-chat should navigate the warm primary window to /");
+  assert(state.messages.length === 0, "--new-chat should not send a quick-chat message");
+
+  resetCalls();
+  state.primaryWindow = state.primary;
+  await runSecondInstance(["codex-desktop", "--quick-chat"]);
+  assert(state.queueArgs.length === 0, "--quick-chat without a deeplink should not be consumed by deeplink routing");
+  assert(state.createFreshLocalWindowCalls.length === 0, "--quick-chat should reuse the warm primary window");
+  assert(state.focusCalls.length === 1 && state.focusCalls[0] === "primary", "--quick-chat should focus the warm primary window");
+  assert(state.messages.length === 1 && state.messages[0].windowId === "primary" && state.messages[0].message.type === "new-quick-chat", "--quick-chat should send new-quick-chat to the warm primary window");
+  assert(state.navigateCalls.length === 0, "--quick-chat should not navigate by route");
+
+  resetCalls();
+  state.primaryWindow = state.primary;
+  await runSecondInstance(["codex-desktop", "--prompt-chat"]);
+  assert(state.queueArgs.length === 0, "--prompt-chat without a deeplink should not be consumed by deeplink routing");
+  assert(state.openHomeCalls === 1, "--prompt-chat should open the compact hotkey prompt on the new-chat home surface");
+  assert(state.ensureHotkeyWindowControllerCalls === 1, "--prompt-chat should use the real hotkey window controller");
+  assert(state.showCalls === 0, "--prompt-chat should not reopen the last hotkey surface");
+  assert(state.controllerShowCalls === 0, "--prompt-chat should not call the controller show fallback");
+  assert(state.ensureHostWindowCalls.length === 0, "--prompt-chat should not open the main window when the hotkey prompt shows");
+  assert(state.hideCalls === 0, "--prompt-chat should not hide the hotkey window before showing it");
+  assert(state.focusCalls.length === 0, "--prompt-chat should not focus the main window");
+
+  resetCalls();
+  state.primaryWindow = state.primary;
+  await runSecondInstance(["codex-desktop", "--hotkey-window"]);
+  assert(state.openHomeCalls === 1, "--hotkey-window should open the compact hotkey prompt on the new-chat home surface");
+  assert(state.ensureHotkeyWindowControllerCalls === 1, "--hotkey-window should use the real hotkey window controller");
+  assert(state.ensureHostWindowCalls.length === 0, "--hotkey-window should not open the main window when the compact prompt shows");
+
+  resetCalls();
+  state.primaryWindow = state.primary;
+  let socket = await runSocketArgs(["codex-desktop", "--prompt-chat"]);
+  assert(socket.outputs[0] === "ok\n", "warm-start socket should acknowledge handled prompt args");
+  assert(state.openHomeCalls === 1, "warm-start socket should open the compact prompt on the new-chat home surface");
+  assert(state.ensureHotkeyWindowControllerCalls === 1, "warm-start socket prompt should use the real hotkey window controller");
+  assert(state.focusCalls.length === 0, "warm-start socket prompt should not focus the main window");
+
+  resetCalls();
+  state.primaryWindow = state.primary;
+  socket = await runSocketArgs(["codex://thread/abc", "--prompt-chat"]);
+  assert(socket.outputs[0] === "ok\n", "warm-start socket should acknowledge deeplink args");
+  assert(state.queueArgs.length === 1, "warm-start socket should check deeplinks before prompt flags");
+  assert(state.openHomeCalls === 0, "warm-start socket should not open the prompt when a deeplink is present");
+
+  resetCalls();
+  socket = await runSocketArgs(["codex-desktop"]);
+  assert(socket.outputs[0] === "ok\n", "warm-start socket should acknowledge fallback focus args");
+  assert(state.ieCalls === 1, "warm-start socket should use the focus fallback for args without launch flags");
+
+  resetCalls();
+  state.primaryWindow = state.primary;
+  await runSecondInstance(["codex://thread/abc", "--quick-chat"]);
+  assert(state.queueArgs.length === 1, "deeplink+flag should check deeplinks");
+  assert(state.messages.length === 0, "deeplink+flag should not open quick chat");
+  assert(state.navigateCalls.length === 0, "deeplink+flag should not navigate to /");
+  assert(state.ieCalls === 0, "deeplink+flag should not fall back to focus");
+
+  resetCalls();
+  state.primaryWindow = state.primary;
+  await runSecondInstance(["codex-browser-sidebar://open", "--quick-chat"]);
+  assert(state.queueArgs.length === 1, "browser-sidebar deeplink+flag should check deeplinks");
+  assert(state.messages.length === 0, "browser-sidebar deeplink+flag should not open quick chat");
+  assert(state.navigateCalls.length === 0, "browser-sidebar deeplink+flag should not navigate to /");
+  assert(state.ieCalls === 0, "browser-sidebar deeplink+flag should not fall back to focus");
+
+  resetCalls();
+  state.primaryWindow = state.primary;
+  await runSecondInstance(["codex://thread/abc", "--prompt-chat"]);
+  assert(state.queueArgs.length === 1, "deeplink+prompt flag should check deeplinks first");
+  assert(state.openHomeCalls === 0, "deeplink+prompt flag should not open the compact prompt");
+  assert(state.showCalls === 0, "deeplink+prompt flag should not show the compact prompt");
+  assert(state.ensureHostWindowCalls.length === 0, "deeplink+prompt flag should not fall back to the host window");
+
+  resetCalls();
+  await runSecondInstance(["codex-desktop"]);
+  assert(state.queueArgs.length === 0, "no-flag args without a deeplink should not be consumed by deeplink routing");
+  assert(state.ieCalls === 1, "no-flag args should use the focus fallback");
+  assert(state.createFreshLocalWindowCalls.length === 1 && state.createFreshLocalWindowCalls[0] === "/", "fallback should create the default window");
+
+  resetCalls();
+  state.primaryWindow = state.primary;
+  await runInitialArgs(["codex-desktop", "--quick-chat"]);
+  assert(state.createFreshLocalWindowCalls.length === 0, "initial argv handler should reuse an existing primary window");
+  assert(state.messages.length === 1 && state.messages[0].windowId === "primary" && state.messages[0].message.type === "new-quick-chat", "initial argv handler should open quick chat in the existing primary window");
+
+  resetCalls();
+  state.primaryWindow = state.primary;
+  await runInitialArgs(["codex-desktop", "--prompt-chat"]);
+  assert(state.openHomeCalls === 1, "initial argv handler should open the compact prompt on the new-chat home surface");
+  assert(state.ensureHotkeyWindowControllerCalls === 1, "initial argv handler should use the real hotkey window controller");
+  assert(state.showCalls === 0, "initial argv handler should not reopen the last hotkey surface");
+  assert(state.ensureHostWindowCalls.length === 0, "initial argv handler should not open the main window when the compact prompt shows");
+
+  resetCalls();
+  await runInitialArgs(["codex-desktop", "--quick-chat"]);
+  assert(state.createFreshLocalWindowCalls.length === 1 && state.createFreshLocalWindowCalls[0] === "/", "initial argv handler should create a window when no primary exists");
+  assert(state.messages.length === 1 && state.messages[0].windowId === "created" && state.messages[0].message.type === "new-quick-chat", "initial argv handler should open quick chat in the created window when no primary exists");
+
+  await boot({ promptChatEnabled: false });
+  resetCalls();
+  state.primaryWindow = state.primary;
+  await runSecondInstance(["codex://thread/abc", "--prompt-chat"]);
+  assert(state.queueArgs.length === 1, "deeplink priority should still win when the prompt-chat gate is disabled");
+  assert(state.openHomeCalls === 0, "disabled prompt-chat gate should not open the compact prompt for deeplink args");
+  assert(state.ieCalls === 0, "deeplink args should not fall back to main-window focus when the prompt-chat gate is disabled");
+
+  resetCalls();
+  state.primaryWindow = state.primary;
+  await runSecondInstance(["codex-desktop", "--prompt-chat"]);
+  assert(state.queueArgs.length === 0, "disabled prompt-chat args without a deeplink should not be consumed by deeplink routing");
+  assert(state.openHomeCalls === 0, "disabled prompt-chat gate should not open the compact prompt");
+  assert(state.ensureHotkeyWindowControllerCalls === 0, "disabled prompt-chat gate should not create the hotkey window controller");
+  assert(state.ieCalls === 1, "disabled prompt-chat gate should fall back to main-window focus");
+  assert(state.focusCalls.length === 1 && state.focusCalls[0] === "primary", "disabled prompt-chat fallback should focus the warm primary window");
+
+  resetCalls();
+  state.primaryWindow = state.primary;
+  await runSecondInstance(["codex-desktop", "--hotkey-window"]);
+  assert(state.openHomeCalls === 0, "disabled prompt-chat gate should also block --hotkey-window prompt opening");
+  assert(state.ensureHotkeyWindowControllerCalls === 0, "disabled prompt-chat gate should not create a controller for --hotkey-window");
+  assert(state.ieCalls === 1, "disabled --hotkey-window should fall back to main-window focus");
+
+  await boot({ warmStartEnabled: false }, { CODEX_DESKTOP_LAUNCH_ACTION_SOCKET: "/tmp/codex-disabled.sock" });
+  assert(state.createServerCalls === 0, "disabled warm-start gate should not create the launch-action socket server");
+  assert(state.socketListenCalls.length === 0, "disabled warm-start gate should not listen on the launch-action socket");
+  assert(state.socketConnectionHandler == null, "disabled warm-start gate should not register a socket connection handler");
+
+  await boot({ trayEnabled: false });
+  assert(state.trayStartupCalls === 0, "disabled tray gate should not start the Linux tray during startup");
+})().catch((error) => {
+  console.error(error.stack || error);
+  process.exit(1);
+});
+NODE
 
     node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
     assert_occurrence_count "$extracted/.vite/build/main-test.js" '!n.app.requestSingleInstanceLock()' '1'
     assert_occurrence_count "$extracted/.vite/build/main-test.js" 'codexLinuxSecondInstanceHandler' '3'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'codexLinuxHandleLaunchActionArgs=' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'e.includes(`--new-chat`)' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'e.includes(`--quick-chat`)' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'e.includes(`--prompt-chat`)' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'e.includes(`--hotkey-window`)' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'codexLinuxShowHotkeyWindow=' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'codexLinuxGetHotkeyWindowController=' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'codexLinuxPrewarmHotkeyWindow=' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'codexLinuxStartLaunchActionSocket=' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'codexLinuxOpenQuickChat=' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'codexLinuxPrewarmHotkeyWindow()' '1'
+
+    node - "$REPO_DIR" "$extracted" "$workspace" <<'NODE'
+const childProcess = require("child_process");
+const fs = require("fs");
+const path = require("path");
+
+const repoDir = process.argv[2];
+const baseExtracted = process.argv[3];
+const workspace = process.argv[4];
+const patcher = path.join(repoDir, "scripts", "patch-linux-window-ui.js");
+const patcherSource = fs.readFileSync(patcher, "utf8");
+const mainBundlePath = path.join(".vite", "build", "main-test.js");
+const baseMainPath = path.join(baseExtracted, mainBundlePath);
+const currentSource = fs.readFileSync(baseMainPath, "utf8");
+
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+function extractConst(name) {
+  const match = patcherSource.match(new RegExp(`const ${name} =\\n    "((?:\\\\.|[^"])*)";`));
+  assert(match, `Could not extract ${name}`);
+  return JSON.parse(`"${match[1]}"`);
+}
+
+function extractCurrentLaunchActionPatch(source) {
+  const match = source.match(/let (?:codexLinuxGetSetting=.*?,)?ae=async\(e,t\)=>\{P\.hotkeyWindowLifecycleManager\.hide\(\);.*?;let oe=async\(\)=>\{/);
+  assert(match, "Could not extract current launch-action patch from smoke bundle");
+  return match[0];
+}
+
+const currentPatch = extractCurrentLaunchActionPatch(currentSource);
+const startupPrewarmNeedle = "codexLinuxPrewarmHotkeyWindow(),A=Date.now(),await R.deepLinks.flushPendingDeepLinks()";
+const startupPrewarmPattern = /codexLinuxPrewarmHotkeyWindow\(\).*?await R\.deepLinks\.flushPendingDeepLinks\(\)/;
+const variants = [
+  ["old-flags-first", extractConst("oldLaunchActionPatch")],
+  ["deep-link-first-all-args", extractConst("deepLinkFirstLaunchActionPatch")],
+  ["warm-start-without-hotkey", extractConst("deepLinkAwareExistingWindowLaunchActionPatch")],
+  ["open-home-without-socket", extractConst("openHomeHotkeyWindowLaunchActionPatch")],
+  ["socket-without-controller-prewarm", extractConst("socketHotkeyWindowLaunchActionPatch")],
+  ["show-based-hotkey-window", extractConst("showBasedHotkeyWindowLaunchActionPatch")],
+  ["fresh-window", extractConst("freshWindowLaunchActionPatch")],
+];
+
+assert(currentSource.includes(currentPatch), "Base smoke bundle does not contain the current launch-action patch");
+
+for (const [name, variant] of variants) {
+  const variantDir = path.join(workspace, `upgrade-${name}`);
+  fs.cpSync(baseExtracted, variantDir, { recursive: true });
+  const variantMainPath = path.join(variantDir, mainBundlePath);
+  const variantSource = currentSource
+    .replace(currentPatch, variant)
+    .replace(`process.platform===\`linux\`&&${startupPrewarmNeedle}`, "A=Date.now(),await R.deepLinks.flushPendingDeepLinks()")
+    .replace(startupPrewarmNeedle, "A=Date.now(),await R.deepLinks.flushPendingDeepLinks()");
+  fs.writeFileSync(variantMainPath, variantSource, "utf8");
+  childProcess.execFileSync(process.execPath, [patcher, variantDir], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const upgraded = fs.readFileSync(variantMainPath, "utf8");
+  assert(upgraded.includes(currentPatch), `${name} variant did not upgrade to the current launch-action handler`);
+  assert(upgraded.includes("codexLinuxGetHotkeyWindowController="), `${name} variant did not include the hotkey controller accessor`);
+  assert(upgraded.includes("ensureHotkeyWindowController"), `${name} variant did not use the real hotkey window controller`);
+  assert(upgraded.includes("codexLinuxPrewarmHotkeyWindow="), `${name} variant did not include the hotkey prompt prewarm helper`);
+  assert(startupPrewarmPattern.test(upgraded), `${name} variant did not include startup hotkey prompt prewarming`);
+  assert(upgraded.includes("codexLinuxStartLaunchActionSocket="), `${name} variant did not include the fast warm-start socket handler`);
+  assert(upgraded.includes("o.mkdirSync(i.default.dirname(e)"), `${name} variant used the wrong fs namespace for the socket directory`);
+  assert(!upgraded.includes("o.default.mkdirSync"), `${name} variant kept the broken fs.default socket setup`);
+  assert(!upgraded.includes("let e=P.hotkeyWindowLifecycleManager;typeof e.openHome"), `${name} variant kept the fake lifecycle-manager openHome path`);
+  assert(!upgraded.includes("P.hotkeyWindowLifecycleManager.prewarm?.()"), `${name} variant kept the fake lifecycle-manager prewarm path`);
+  assert(!upgraded.includes("P.hotkeyWindowLifecycleManager.show()||await P.ensureHostWindow(z)"), `${name} variant kept the show-based hotkey handler`);
+  assert(!upgraded.includes("codexLinuxOpenNewChat="), `${name} variant kept the fresh-window handler`);
+  assert(!upgraded.includes("Array.isArray(e)&&R.deepLinks.queueProcessArgs(e)?!0"), `${name} variant kept broad deeplink routing`);
+}
+NODE
 }
 
 test_linux_file_manager_patch_fails_soft() {
@@ -518,6 +1246,8 @@ main() {
     test_launcher_template_sanity
     test_linux_file_manager_patch_smoke
     test_linux_translucent_sidebar_default_patch_smoke
+    test_keybinds_settings_tab_patch_smoke
+    test_keybinds_settings_patch_warns_on_bundle_shape_miss
     test_linux_tray_patch_smoke
     test_browser_annotation_screenshot_patch_smoke
     test_linux_single_instance_patch_smoke

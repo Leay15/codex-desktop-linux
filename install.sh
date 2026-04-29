@@ -64,6 +64,8 @@ Options:
 
 Environment variables:
   CODEX_INSTALL_DIR   Override the install directory (default: ./codex-app)
+  CODEX_INSTALL_ALLOW_RUNNING=1
+                      Allow overwriting INSTALL_DIR while Codex is running
 
 After install, launch with:
   ./codex-app/start.sh
@@ -94,6 +96,79 @@ parse_args() {
         esac
         shift
     done
+}
+
+canonical_path() {
+    realpath -m "$1"
+}
+
+pid_is_current_user() {
+    local pid="$1"
+    local uid
+
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    [ -d "/proc/$pid" ] || return 1
+    uid="$(awk '/^Uid:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)"
+    [ "$uid" = "$(id -u)" ]
+}
+
+pid_matches_install_target() {
+    local pid="$1"
+    local expected="$2"
+    local actual
+
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    [ -d "/proc/$pid" ] || return 1
+    pid_is_current_user "$pid" || return 1
+    actual="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+    [ -n "$actual" ] || return 1
+    [ "$actual" = "$(canonical_path "$expected")" ]
+}
+
+find_running_install_target_pid() {
+    local electron_path="$INSTALL_DIR/electron"
+    local app_pid_file="${XDG_STATE_HOME:-$HOME/.local/state}/codex-desktop/app.pid"
+    local pid
+    local proc_exe
+
+    [ -e "$electron_path" ] || return 1
+
+    if [ -f "$app_pid_file" ]; then
+        pid="$(cat "$app_pid_file" 2>/dev/null || true)"
+        if pid_matches_install_target "$pid" "$electron_path"; then
+            echo "$pid"
+            return 0
+        fi
+    fi
+
+    for proc_exe in /proc/[0-9]*/exe; do
+        [ -e "$proc_exe" ] || continue
+        pid="${proc_exe#/proc/}"
+        pid="${pid%/exe}"
+        if pid_matches_install_target "$pid" "$electron_path"; then
+            echo "$pid"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+assert_install_target_not_running() {
+    local pid
+
+    if [ "${CODEX_INSTALL_ALLOW_RUNNING:-0}" = "1" ]; then
+        warn "CODEX_INSTALL_ALLOW_RUNNING=1 set; installer may overwrite a running Codex app"
+        return 0
+    fi
+
+    if pid="$(find_running_install_target_pid)"; then
+        error "Codex Desktop is currently running from $INSTALL_DIR (pid $pid).
+Close that app before rebuilding this install directory, or build into a separate path:
+  CODEX_INSTALL_DIR=/tmp/codex-app-build ./install.sh
+
+Set CODEX_INSTALL_ALLOW_RUNNING=1 only if you intentionally want to overwrite a running app."
+    fi
 }
 
 prepare_install() {
@@ -490,21 +565,34 @@ create_start_script() {
 #!/bin/bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SOURCE_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE_PATH" ]; do
+    SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+    SOURCE_PATH="$(readlink "$SOURCE_PATH")"
+    [[ "$SOURCE_PATH" != /* ]] && SOURCE_PATH="$SOURCE_DIR/$SOURCE_PATH"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
 WEBVIEW_DIR="$SCRIPT_DIR/content/webview"
 LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/codex-desktop"
 LOG_FILE="$LOG_DIR/launcher.log"
+APP_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/codex-desktop"
+APP_SETTINGS_FILE="$APP_CONFIG_DIR/settings.json"
 APP_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codex-desktop"
 APP_PID_FILE="$APP_STATE_DIR/app.pid"
 WEBVIEW_PID_FILE="$APP_STATE_DIR/webview.pid"
+LAUNCH_ACTION_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$APP_STATE_DIR}/codex-desktop"
+LAUNCH_ACTION_SOCKET="$LAUNCH_ACTION_RUNTIME_DIR/launch-action.sock"
 PACKAGED_RUNTIME_HELPER="$SCRIPT_DIR/.codex-linux/codex-packaged-runtime.sh"
 APP_NOTIFICATION_ICON_NAME="codex-desktop"
 APP_NOTIFICATION_ICON_BUNDLE="$SCRIPT_DIR/.codex-linux/$APP_NOTIFICATION_ICON_NAME.png"
 APP_NOTIFICATION_ICON_SYSTEM="/usr/share/icons/hicolor/256x256/apps/$APP_NOTIFICATION_ICON_NAME.png"
 APP_NOTIFICATION_ICON_REPO="$SCRIPT_DIR/../assets/codex.png"
 
-mkdir -p "$LOG_DIR" "$APP_STATE_DIR"
+mkdir -p "$LOG_DIR" "$APP_CONFIG_DIR" "$APP_STATE_DIR" "$LAUNCH_ACTION_RUNTIME_DIR"
+chmod 700 "$LAUNCH_ACTION_RUNTIME_DIR" 2>/dev/null || true
+export CODEX_DESKTOP_LAUNCH_ACTION_SOCKET="$LAUNCH_ACTION_SOCKET"
 STARTED_WEBVIEW_PID=""
+ADOPTED_WEBVIEW_PID=""
 ELECTRON_PID=""
 RUNNING_APP_PID=""
 WARM_START=0
@@ -517,6 +605,10 @@ Launches the Codex Desktop app.
 
 Options:
   -h, --help                  Show this help message and exit
+  --new-chat                  Open the main window on a new chat
+  --quick-chat                Open a projectless quick chat
+  --prompt-chat               Show the compact prompt for a new chat
+  --hotkey-window             Alias for --prompt-chat
   --disable-gpu               Completely disable GPU acceleration
   --disable-gpu-compositing   Disable GPU compositing (fixes flickering)
   --ozone-platform=x11        Force X11/XWayland explicitly
@@ -548,6 +640,37 @@ log_phase() {
     local elapsed_ms
     elapsed_ms="$(($(now_ms) - LAUNCHER_START_MS))"
     echo "[$(date -Is)] launcher_phase=$phase elapsedMs=$elapsed_ms"
+}
+
+linux_setting_enabled() {
+    local key="$1"
+    local default_value="${2:-1}"
+
+    python3 - "$APP_SETTINGS_FILE" "$key" "$default_value" <<'PY'
+import json
+import sys
+
+settings_path, key, default_value = sys.argv[1:4]
+enabled = default_value == "1"
+
+try:
+    with open(settings_path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if isinstance(data, dict) and key in data:
+        value = data[key]
+        if isinstance(value, bool):
+            enabled = value
+        elif isinstance(value, (int, float)):
+            enabled = value != 0
+        elif isinstance(value, str):
+            enabled = value.strip().lower() not in {"0", "false", "no", "off"}
+except FileNotFoundError:
+    pass
+except (OSError, json.JSONDecodeError):
+    pass
+
+raise SystemExit(0 if enabled else 1)
+PY
 }
 
 load_packaged_runtime_helper() {
@@ -788,12 +911,60 @@ find_running_app_pid() {
     return 1
 }
 
+running_app_is_active() {
+    [ -n "${RUNNING_APP_PID:-}" ] && pid_matches_executable "$RUNNING_APP_PID" "$SCRIPT_DIR/electron"
+}
+
+using_second_instance_handoff() {
+    [ "$WARM_START" -eq 0 ] && running_app_is_active
+}
+
+needs_cold_start() {
+    [ "$WARM_START" -eq 0 ] && ! using_second_instance_handoff
+}
+
 detect_warm_start() {
     if RUNNING_APP_PID="$(find_running_app_pid)"; then
-        WARM_START=1
         echo "$RUNNING_APP_PID" > "$APP_PID_FILE"
+        if ! linux_setting_enabled "codex-linux-warm-start-enabled" 1; then
+            WARM_START=0
+            echo "Warm-start handoff disabled by $APP_SETTINGS_FILE"
+            echo "Detected running Codex Desktop pid=$RUNNING_APP_PID; preserving liveness marker for second-instance handoff"
+            return 0
+        fi
+
+        WARM_START=1
         echo "Detected running Codex Desktop pid=$RUNNING_APP_PID; using warm-start handoff"
+        return 0
     fi
+
+    if ! linux_setting_enabled "codex-linux-warm-start-enabled" 1; then
+        WARM_START=0
+        echo "Warm-start handoff disabled by $APP_SETTINGS_FILE"
+    fi
+}
+
+send_warm_start_launch_action() {
+    [ "$WARM_START" -eq 1 ] || return 1
+    [ -S "$LAUNCH_ACTION_SOCKET" ] || return 1
+
+    python3 - "$LAUNCH_ACTION_SOCKET" "$@" <<'PY'
+import json
+import socket
+import sys
+
+socket_path = sys.argv[1]
+argv = sys.argv[2:]
+payload = json.dumps({"argv": argv}, separators=(",", ":")).encode("utf-8") + b"\n"
+
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(1.0)
+try:
+    client.connect(socket_path)
+    client.sendall(payload)
+finally:
+    client.close()
+PY
 }
 
 wait_for_webview_server() {
@@ -853,6 +1024,11 @@ stop_owned_webview_server() {
         pid="$(cat "$WEBVIEW_PID_FILE" 2>/dev/null || true)"
     fi
 
+    if running_app_is_active && [ -n "$pid" ] && pid_is_webview_server "$pid"; then
+        echo "Preserving webview server pid=$pid owned by running Codex Desktop pid=$RUNNING_APP_PID"
+        return 0
+    fi
+
     if [ -n "$pid" ] && pid_is_webview_server "$pid"; then
         echo "Stopping owned webview server pid=$pid"
         kill "$pid" 2>/dev/null || true
@@ -905,14 +1081,24 @@ adopt_existing_webview_server() {
     local pid
 
     if pid="$(owned_webview_server_pid)"; then
-        STARTED_WEBVIEW_PID="$pid"
+        if running_app_is_active; then
+            ADOPTED_WEBVIEW_PID="$pid"
+            echo "Reusing webview server pid=$pid owned by running Codex Desktop pid=$RUNNING_APP_PID"
+        else
+            STARTED_WEBVIEW_PID="$pid"
+        fi
         return 0
     fi
 
     if pid="$(discover_webview_server_pid)"; then
-        STARTED_WEBVIEW_PID="$pid"
         echo "$pid" > "$WEBVIEW_PID_FILE"
-        echo "Adopted existing webview server pid=$pid dir=$WEBVIEW_DIR"
+        if running_app_is_active; then
+            ADOPTED_WEBVIEW_PID="$pid"
+            echo "Reusing webview server pid=$pid owned by running Codex Desktop pid=$RUNNING_APP_PID"
+        else
+            STARTED_WEBVIEW_PID="$pid"
+            echo "Adopted existing webview server pid=$pid dir=$WEBVIEW_DIR"
+        fi
         return 0
     fi
 
@@ -924,10 +1110,17 @@ ensure_webview_server() {
         return 0
     fi
 
-    if adopt_existing_webview_server && verify_webview_origin "http://127.0.0.1:5175/index.html" >/dev/null 2>&1; then
-        echo "Reusing existing verified webview server on :5175"
-        log_phase "webview_reused"
-        return 0
+    if adopt_existing_webview_server; then
+        if verify_webview_origin "http://127.0.0.1:5175/index.html" >/dev/null 2>&1; then
+            echo "Reusing existing verified webview server on :5175"
+            log_phase "webview_reused"
+            return 0
+        fi
+
+        if running_app_is_active; then
+            notify_error "Codex Desktop webview server is already running for pid $RUNNING_APP_PID, but origin validation failed. Keeping the live app untouched."
+            exit 1
+        fi
     fi
 
     if verify_webview_origin "http://127.0.0.1:5175/index.html" >/dev/null 2>&1; then
@@ -1047,7 +1240,11 @@ launch_electron() {
         --enable-features=WaylandWindowDecorations \
         "$@" &
     ELECTRON_PID=$!
-    echo "$ELECTRON_PID" > "$APP_PID_FILE"
+    if [ -n "${RUNNING_APP_PID:-}" ] && pid_matches_executable "$RUNNING_APP_PID" "$SCRIPT_DIR/electron"; then
+        echo "Preserving Codex Desktop pid=$RUNNING_APP_PID liveness marker for second-instance handoff"
+    else
+        echo "$ELECTRON_PID" > "$APP_PID_FILE"
+    fi
     log_phase "electron_spawned"
 
     set +e
@@ -1062,7 +1259,18 @@ clear_stale_pid_file
 detect_warm_start
 trap cleanup_launcher EXIT
 
-if [ "$WARM_START" -eq 0 ]; then
+if send_warm_start_launch_action "$@"; then
+    echo "Sent launch args over warm-start IPC"
+    log_phase "warm_start_ipc_sent"
+    exit 0
+elif [ "$WARM_START" -eq 1 ]; then
+    echo "Warm-start IPC unavailable; falling back to Electron second-instance handoff"
+fi
+
+if using_second_instance_handoff; then
+    echo "Detected running Codex Desktop pid=$RUNNING_APP_PID; using Electron second-instance handoff"
+    log_phase "second_instance_handoff_ready"
+elif needs_cold_start; then
     run_packaged_runtime_prelaunch
     log_phase "packaged_prelaunch"
     ensure_webview_server
@@ -1071,14 +1279,14 @@ else
     log_phase "warm_start_ready"
 fi
 
-if [ "$WARM_START" -eq 0 ] && [ -z "${CODEX_CLI_PATH:-}" ]; then
+if needs_cold_start && [ -z "${CODEX_CLI_PATH:-}" ]; then
     CODEX_CLI_PATH="$(find_codex_cli || true)"
     export CODEX_CLI_PATH
     log_phase "cli_lookup"
 fi
 export CHROME_DESKTOP="${CHROME_DESKTOP:-codex-desktop.desktop}"
 
-if [ "$WARM_START" -eq 0 ] && [ -z "$CODEX_CLI_PATH" ]; then
+if needs_cold_start && [ -z "$CODEX_CLI_PATH" ]; then
     if prompt_install_missing_cli; then
         if ! run_cli_preflight 1; then
             notify_error "Codex CLI automatic installation failed. Install with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
@@ -1087,12 +1295,12 @@ if [ "$WARM_START" -eq 0 ] && [ -z "$CODEX_CLI_PATH" ]; then
     fi
 fi
 
-if [ "$WARM_START" -eq 0 ] && [ -z "$CODEX_CLI_PATH" ]; then
+if needs_cold_start && [ -z "$CODEX_CLI_PATH" ]; then
     notify_error "Codex CLI not found. Install with: npm i -g @openai/codex or npm i -g --prefix ~/.local @openai/codex"
     exit 1
 fi
 
-if [ "$WARM_START" -eq 0 ]; then
+if needs_cold_start; then
     if [ "${CODEX_SYNC_CLI_PREFLIGHT:-0}" = "1" ]; then
         run_cli_preflight 0
         log_phase "cli_preflight_sync"
@@ -1129,6 +1337,7 @@ main() {
 
     parse_args "$@"
     check_deps
+    assert_install_target_not_running
     prepare_install
 
     local dmg_path=""
