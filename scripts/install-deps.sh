@@ -56,6 +56,49 @@ Existing user-managed Node.js 20 installations are still accepted by install.sh,
     fi
 }
 
+apt_nodejs_candidate_major() {
+    local line candidate major=""
+
+    while IFS= read -r line; do
+        case "$line" in
+            *Candidate:*)
+                candidate="${line#*Candidate: }"
+                break
+                ;;
+        esac
+    done < <(apt-cache policy nodejs 2>/dev/null || true)
+
+    [ -n "${candidate:-}" ] && [ "$candidate" != "(none)" ] || return 1
+
+    if [[ "$candidate" =~ ^[0-9]+:([0-9]+)\. ]]; then
+        major="${BASH_REMATCH[1]}"
+    elif [[ "$candidate" =~ ^([0-9]+)\. ]]; then
+        major="${BASH_REMATCH[1]}"
+    else
+        return 1
+    fi
+
+    printf '%s\n' "$major"
+}
+
+install_apt_distro_nodejs_if_compatible() {
+    local major
+    major="$(apt_nodejs_candidate_major 2>/dev/null || true)"
+
+    if [ -z "$major" ]; then
+        warn "Could not determine distro nodejs candidate; using NodeSource"
+        return 1
+    fi
+
+    if [ "$major" -lt "$MIN_NODE_MAJOR" ]; then
+        warn "Distro nodejs candidate is below Node.js ${MIN_NODE_MAJOR}; using NodeSource"
+        return 1
+    fi
+
+    info "Installing distro Node.js/npm candidate (Node.js major $major)"
+    sudo apt-get install -y nodejs npm
+}
+
 apt_arch_for_nodesource() {
     local apt_arch
     apt_arch="$(dpkg --print-architecture)"
@@ -121,6 +164,13 @@ Install a supported Node.js version for this distro, then re-run this script."
     fi
 
     warn "Node.js ${MIN_NODE_MAJOR}+ with npm and npx is required$(current_node_version_suffix)"
+    install_apt_distro_nodejs_if_compatible || true
+
+    if has_compatible_nodejs; then
+        report_nodejs_toolchain
+        return
+    fi
+
     install_nodesource_nodejs
 
     if has_compatible_nodejs; then

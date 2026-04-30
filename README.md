@@ -58,7 +58,7 @@ bash scripts/install-deps.sh
 ```
 
 That helper detects `apt`, `dnf5`, `dnf`, `pacman`, or `zypper`, installs system packages, and bootstraps Rust through `rustup` if needed.
-On apt-based systems, it also bootstraps Node.js 22 from NodeSource when the distro `nodejs` package is missing or too old. Set `NODEJS_MAJOR=24` if you want to bootstrap Node.js 24 instead.
+On apt-based systems, it uses a compatible distro `nodejs`/`npm` candidate when available and otherwise bootstraps Node.js 22 from NodeSource. Set `NODEJS_MAJOR=24` if you want to bootstrap Node.js 24 instead.
 The generated launcher can then auto-install `@openai/codex` on first run if the CLI is still missing and `npm` is available.
 
 If you prefer to preinstall the CLI manually:
@@ -83,7 +83,7 @@ Ubuntu 22.04, Ubuntu 24.04, Debian 12, and related distros can provide stock `no
 bash scripts/install-deps.sh
 ```
 
-The helper installs Node.js 22 from NodeSource only when the current `node`/`npm`/`npx` toolchain is missing or incompatible. To bootstrap another maintained line:
+The helper uses a compatible distro `nodejs`/`npm` candidate when available. If the current toolchain is missing or incompatible and the distro candidate is too old, it installs Node.js 22 from NodeSource. To bootstrap another maintained line:
 
 ```bash
 NODEJS_MAJOR=24 bash scripts/install-deps.sh

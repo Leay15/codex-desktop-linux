@@ -308,6 +308,8 @@ test_launcher_template_sanity() {
     assert_contains "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh" "codex-update-manager check-now --if-stale"
     assert_not_contains "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh" "restart codex-update-manager.service"
     assert_contains "$REPO_DIR/scripts/install-deps.sh" 'NODEJS_MAJOR="${NODEJS_MAJOR:-22}"'
+    assert_contains "$REPO_DIR/scripts/install-deps.sh" "apt_nodejs_candidate_major"
+    assert_contains "$REPO_DIR/scripts/install-deps.sh" "Installing distro Node.js/npm candidate"
     assert_contains "$REPO_DIR/scripts/install-deps.sh" "/etc/apt/keyrings/nodesource.gpg"
     assert_contains "$REPO_DIR/scripts/install-deps.sh" "signed-by="
     assert_contains "$REPO_DIR/scripts/install-deps.sh" "https://deb.nodesource.com/node_"
