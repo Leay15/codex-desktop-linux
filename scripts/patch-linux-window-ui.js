@@ -859,6 +859,35 @@ function applyLinuxSingleInstancePatch(currentSource) {
   return patchedSource;
 }
 
+function applyLinuxComputerUsePluginGatePatch(currentSource) {
+  const computerUseGateNeedle =
+    "{name:tn,isEnabled:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:wn}";
+  const computerUseLinuxGateNeedle =
+    "{name:tn,isEnabled:({features:e,platform:t})=>(t===`darwin`||t===`linux`)&&e.computerUse,migrate:wn}";
+  const computerUseGatePatch =
+    "{installWhenMissing:!0,name:tn,isEnabled:({features:e,platform:t})=>(t===`darwin`||t===`linux`)&&e.computerUse,migrate:wn}";
+
+  if (currentSource.includes(computerUseGatePatch)) {
+    return currentSource;
+  }
+
+  if (currentSource.includes(computerUseGateNeedle)) {
+    return currentSource.replace(computerUseGateNeedle, computerUseGatePatch);
+  }
+
+  if (currentSource.includes(computerUseLinuxGateNeedle)) {
+    return currentSource.replace(computerUseLinuxGateNeedle, computerUseGatePatch);
+  }
+
+  if (currentSource.includes("`computer-use`") && currentSource.includes("e.computerUse")) {
+    console.warn(
+      "WARN: Could not find Computer Use plugin platform gate — skipping Linux Computer Use gate patch",
+    );
+  }
+
+  return currentSource;
+}
+
 function applyBrowserAnnotationScreenshotPatch(currentSource) {
   let patchedSource = currentSource;
 
@@ -1049,6 +1078,7 @@ function patchMainBundleSource(source, iconAsset) {
   patched = applyLinuxFileManagerPatch(patched);
   patched = applyLinuxTrayPatch(patched, iconPathExpression);
   patched = applyLinuxSingleInstancePatch(patched);
+  patched = applyLinuxComputerUsePluginGatePatch(patched);
   patched = applyLinuxTrayCloseSettingPatch(patched);
   patched = applyLinuxSettingsPersistencePatch(patched);
   patched = applyLinuxLaunchActionArgsPatch(patched);
@@ -1063,11 +1093,20 @@ function patchPackageJson(extractedDir) {
   }
 
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-  if (packageJson.desktopName !== "codex-desktop.desktop") {
-    packageJson.desktopName = "codex-desktop.desktop";
+  const desktopName = resolveDesktopName();
+  if (packageJson.desktopName !== desktopName) {
+    packageJson.desktopName = desktopName;
     fs.writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`, "utf8");
   }
   return packageJson.desktopName;
+}
+
+function resolveDesktopName(env = process.env) {
+  const appId = env.CODEX_APP_ID || "codex-desktop";
+  if (!/^[A-Za-z0-9._-]+$/.test(appId)) {
+    throw new Error("CODEX_APP_ID must contain only letters, numbers, dots, underscores, and hyphens");
+  }
+  return `${appId}.desktop`;
 }
 
 function patchCommentPreloadBundle(extractedDir) {
@@ -1183,6 +1222,7 @@ module.exports = {
   applyKeybindsSettingsIndexPatch,
   applyKeybindsSettingsSectionsPatch,
   applyKeybindsSettingsSharedPatch,
+  applyLinuxComputerUsePluginGatePatch,
   applyLinuxFileManagerPatch,
   applyLinuxHotkeyWindowPrewarmPatch,
   applyLinuxLaunchActionArgsPatch,
@@ -1199,5 +1239,7 @@ module.exports = {
   patchKeybindsSettingsAssets,
   patchExtractedApp,
   patchMainBundleSource,
+  patchPackageJson,
+  resolveDesktopName,
   resolveKeybindsSettingsAsset,
 };

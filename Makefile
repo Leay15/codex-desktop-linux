@@ -3,13 +3,17 @@ SHELL := /bin/bash
 
 APP_DIR := $(CURDIR)/codex-app
 PACKAGE_NAME := codex-desktop
+DEV_APP_ID ?= codex-cua-lab
+DEV_APP_NAME ?= Codex CUA Lab
+DEV_APP_DIR ?= $(CURDIR)/$(DEV_APP_ID)-app
+DEV_APP_BIN ?= $(CURDIR)/bin/$(DEV_APP_ID)
 DEB_GLOB := $(CURDIR)/dist/$(PACKAGE_NAME)_*.deb
 RPM_GLOB := $(CURDIR)/dist/$(PACKAGE_NAME)-*.rpm
 PACMAN_GLOB := $(CURDIR)/dist/$(PACKAGE_NAME)-[0-9]*.pkg.tar.*
 
 .DEFAULT_GOAL := help
 
-.PHONY: help check test build-updater build-app run-app deb rpm pacman package install service-enable service-status clean-dist clean-state
+.PHONY: help check test build-updater build-app run-app build-dev-app run-dev-app deb rpm pacman package install service-enable service-status clean-dist clean-state
 
 help:
 	@printf '\nCodex Desktop Linux Make Targets\n\n'
@@ -18,6 +22,8 @@ help:
 	@printf '  %-18s %s\n' "make build-updater" "Build codex-update-manager in release mode"
 	@printf '  %-18s %s\n' "make build-app" "Run install.sh and regenerate codex-app/"
 	@printf '  %-18s %s\n' "make run-app" "Launch the local generated Electron app from codex-app/"
+	@printf '  %-18s %s\n' "make build-dev-app" "Build a side-by-side test app with a distinct app id/bin"
+	@printf '  %-18s %s\n' "make run-dev-app" "Launch the side-by-side test app"
 	@printf '  %-18s %s\n' "make deb" "Build the Debian package into dist/"
 	@printf '  %-18s %s\n' "make rpm" "Build the RPM package into dist/ (Fedora/openSUSE)"
 	@printf '  %-18s %s\n' "make pacman" "Build the pacman package into dist/ (Arch)"
@@ -29,6 +35,8 @@ help:
 	@printf '  %-18s %s\n' "make clean-state" "Remove updater runtime state from XDG directories"
 	@printf '\nVariables:\n\n'
 	@printf '  %-18s %s\n' "DMG=/path/file.dmg" "Override the DMG passed to install.sh (default: let install.sh reuse/download Codex.dmg)"
+	@printf '  %-18s %s\n' "DEV_APP_ID=..." "Override side-by-side test app id/bin (default: codex-cua-lab)"
+	@printf '  %-18s %s\n' "DEV_APP_NAME=..." "Override side-by-side test app display name"
 	@printf '  %-18s %s\n' "PACKAGE_VERSION=..." "Override the package version for make deb / make rpm / make pacman"
 	@printf '  %-18s %s\n' "DEB=/path/file.deb" "Override the .deb used by make install"
 	@printf '  %-18s %s\n' "RPM=/path/file.rpm" "Override the .rpm used by make install"
@@ -36,6 +44,8 @@ help:
 	@printf '\nExamples:\n\n'
 	@printf '  %s\n' "make build-app DMG=/tmp/Codex.dmg"
 	@printf '  %s\n' "make run-app"
+	@printf '  %s\n' "make build-dev-app"
+	@printf '  %s\n' "./bin/codex-cua-lab"
 	@printf '  %s\n' "make deb PACKAGE_VERSION=2026.03.24.220723+88f07cd3"
 	@printf '  %s\n' "make rpm PACKAGE_VERSION=2026.03.24.220723+88f07cd3"
 	@printf '  %s\n' "make pacman PACKAGE_VERSION=2026.03.24.220723+88f07cd3"
@@ -61,6 +71,20 @@ build-app:
 run-app:
 	@echo "[make] Launching local Electron app"
 	"$(APP_DIR)/start.sh"
+
+build-dev-app:
+	@echo "[make] Building side-by-side Electron app as $(DEV_APP_ID)"
+	CODEX_APP_ID="$(DEV_APP_ID)" \
+	CODEX_APP_DISPLAY_NAME="$(DEV_APP_NAME)" \
+	CODEX_INSTALL_DIR="$(DEV_APP_DIR)" \
+		./install.sh "$(DMG)"
+	@mkdir -p "$(CURDIR)/bin"
+	@ln -sfn "$(DEV_APP_DIR)/start.sh" "$(DEV_APP_BIN)"
+	@echo "[make] Side-by-side launcher: $(DEV_APP_BIN)"
+
+run-dev-app:
+	@echo "[make] Launching side-by-side Electron app"
+	"$(DEV_APP_BIN)"
 
 deb: build-updater
 	@echo "[make] Building Debian package"

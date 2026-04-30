@@ -1,0 +1,36 @@
+{
+  "name": "computer-use",
+  "version": "0.1.0-linux-alpha1",
+  "description": "Control desktop apps on Linux from Codex through Computer Use.",
+  "author": {
+    "name": "OpenAI"
+  },
+  "homepage": "https://openai.com/",
+  "license": "Proprietary",
+  "keywords": [
+    "computer-use",
+    "desktop-control",
+    "linux",
+    "wayland",
+    "gnome",
+    "accessibility"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Computer Use",
+    "shortDescription": "Control Linux desktop apps from Codex",
+    "longDescription": "Linux Computer Use lets Codex inspect and control desktop apps through a native Linux backend. It may use screenshots, accessibility metadata, and input events after you allow it. You stay in control: you choose which apps to allow Codex to access and can stop actions at any time.",
+    "developerName": "OpenAI",
+    "category": "Productivity",
+    "websiteURL": "https://openai.com/",
+    "privacyPolicyURL": "https://openai.com/policies/row-privacy-policy/",
+    "termsOfServiceURL": "https://openai.com/policies/row-terms-of-use/",
+    "logo": "./assets/app-icon.png",
+    "defaultPrompt": [
+      "Check whether Linux Computer Use is ready",
+      "List running desktop apps"
+    ],
+    "brandColor": "#0F172A",
+    "screenshots": []
+  }
+}

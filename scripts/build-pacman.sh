@@ -73,7 +73,8 @@ main() {
 		-e "s|__STAGING_DIR__|$staging_root|g" \
 		-e "s/__ARCH__/$arch/g" \
 		"$PKGBUILD_TEMPLATE" >"$build_root/PKGBUILD"
-	cp "$INSTALL_HOOKS" "$build_root/${PACKAGE_NAME}.install"
+	sed -e "s|/opt/codex-desktop|/opt/$PACKAGE_NAME|g" \
+		"$INSTALL_HOOKS" >"$build_root/${PACKAGE_NAME}.install"
 
 	mkdir -p "$DIST_DIR"
 	info "Building ${PACKAGE_NAME}-${PACMAN_PKGVER}-${PACMAN_PKGREL}-${arch}.pkg.tar.zst"

@@ -20,6 +20,37 @@ ensure_app_layout() {
     [ -x "$APP_DIR/start.sh" ] || error "Missing launcher: $APP_DIR/start.sh"
 }
 
+sed_escape_replacement() {
+    printf '%s' "$1" | sed -e 's/[\/&]/\\&/g'
+}
+
+render_desktop_entry() {
+    local target="$1"
+    local package_name
+    local display_name
+    local comment
+
+    package_name="$(sed_escape_replacement "$PACKAGE_NAME")"
+    display_name="$(sed_escape_replacement "${PACKAGE_DISPLAY_NAME:-Codex Desktop}")"
+    comment="$(sed_escape_replacement "${PACKAGE_COMMENT:-Run Codex Desktop on Linux}")"
+
+    sed \
+        -e "s/codex-desktop/$package_name/g" \
+        -e "s/^Name=.*/Name=$display_name/g" \
+        -e "s/^Comment=.*/Comment=$comment/g" \
+        "$DESKTOP_TEMPLATE" > "$target"
+    chmod 0644 "$target"
+}
+
+render_packaged_runtime_helper() {
+    local target="$1"
+    local package_name
+
+    package_name="$(sed_escape_replacement "$PACKAGE_NAME")"
+    sed -e "s/codex-desktop/$package_name/g" "$PACKAGED_RUNTIME_SOURCE" > "$target"
+    chmod 0644 "$target"
+}
+
 updater_binary_is_stale() {
     local binary="$1"
 
@@ -76,7 +107,7 @@ stage_common_package_files() {
     cp -aT "$APP_DIR" "$app_root"
     mkdir -p "$app_root/.codex-linux"
     cp "$ICON_SOURCE" "$app_root/.codex-linux/$PACKAGE_NAME.png"
-    cp "$DESKTOP_TEMPLATE" "$root/usr/share/applications/$PACKAGE_NAME.desktop"
+    render_desktop_entry "$root/usr/share/applications/$PACKAGE_NAME.desktop"
     cp "$ICON_SOURCE" "$root/usr/share/icons/hicolor/256x256/apps/$PACKAGE_NAME.png"
     cp "$UPDATER_BINARY_SOURCE" "$root/usr/bin/codex-update-manager"
     chmod 0755 "$root/usr/bin/codex-update-manager"
@@ -84,8 +115,7 @@ stage_common_package_files() {
     chmod 0644 "$root/usr/lib/systemd/user/codex-update-manager.service"
     cp "$polkit_policy" "$root/usr/share/polkit-1/actions/com.github.ilysenko.codex-desktop-linux.update.policy"
     chmod 0644 "$root/usr/share/polkit-1/actions/com.github.ilysenko.codex-desktop-linux.update.policy"
-    cp "$PACKAGED_RUNTIME_SOURCE" "$app_root/.codex-linux/codex-packaged-runtime.sh"
-    chmod 0644 "$app_root/.codex-linux/codex-packaged-runtime.sh"
+    render_packaged_runtime_helper "$app_root/.codex-linux/codex-packaged-runtime.sh"
 }
 
 stage_update_builder_bundle() {
@@ -99,6 +129,12 @@ stage_update_builder_bundle() {
         "$update_builder_root/assets"
 
     cp "$REPO_DIR/install.sh" "$update_builder_root/install.sh"
+    cp "$REPO_DIR/Cargo.toml" "$update_builder_root/Cargo.toml"
+    cp "$REPO_DIR/Cargo.lock" "$update_builder_root/Cargo.lock"
+    cp -r "$REPO_DIR/computer-use-linux" "$update_builder_root/computer-use-linux"
+    mkdir -p "$update_builder_root/plugins/openai-bundled/plugins"
+    cp -r "$REPO_DIR/plugins/openai-bundled/plugins/computer-use" \
+        "$update_builder_root/plugins/openai-bundled/plugins/computer-use"
     cp "$REPO_DIR/scripts/build-deb.sh" "$update_builder_root/scripts/build-deb.sh"
     cp "$REPO_DIR/scripts/build-rpm.sh" "$update_builder_root/scripts/build-rpm.sh"
     cp "$REPO_DIR/scripts/build-pacman.sh" "$update_builder_root/scripts/build-pacman.sh"

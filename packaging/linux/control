@@ -1,4 +1,4 @@
-Package: codex-desktop
+Package: __PACKAGE_NAME__
 Version: __VERSION__
 Section: utils
 Priority: optional

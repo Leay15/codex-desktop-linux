@@ -120,7 +120,66 @@ SCRIPT
     assert_file_exists "$pkg_root/DEBIAN/prerm"
     assert_file_exists "$pkg_root/DEBIAN/postrm"
     assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/scripts/lib/package-common.sh"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/Cargo.toml"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/computer-use-linux/Cargo.toml"
+    assert_file_exists "$pkg_root/opt/codex-desktop/update-builder/plugins/openai-bundled/plugins/computer-use/.mcp.json"
     assert_file_exists "$pkg_root/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh"
+}
+
+test_deb_builder_respects_package_identity() {
+    info "Running side-by-side Debian packaging smoke test"
+    local workspace="$TMP_DIR/deb-identity"
+    local bin_dir="$workspace/bin"
+    local app_dir="$workspace/app"
+    local dist_dir="$workspace/dist"
+    local pkg_root="$workspace/deb-root"
+    local updater_bin="$workspace/codex-update-manager"
+
+    mkdir -p "$workspace" "$dist_dir"
+    make_stub_bin_dir "$bin_dir"
+    make_fake_app "$app_dir"
+    printf '#!/bin/bash\nexit 0\n' > "$updater_bin"
+    chmod +x "$updater_bin"
+
+    cat > "$bin_dir/dpkg" <<'SCRIPT'
+#!/bin/bash
+if [ "$1" = "--print-architecture" ]; then
+    echo amd64
+    exit 0
+fi
+exit 0
+SCRIPT
+    cat > "$bin_dir/dpkg-deb" <<'SCRIPT'
+#!/bin/bash
+output="${@: -1}"
+mkdir -p "$(dirname "$output")"
+touch "$output"
+SCRIPT
+    cat > "$bin_dir/cargo" <<'SCRIPT'
+#!/bin/bash
+echo "cargo should not be called when UPDATER_BINARY_SOURCE exists" >&2
+exit 99
+SCRIPT
+    chmod +x "$bin_dir/dpkg" "$bin_dir/dpkg-deb" "$bin_dir/cargo"
+
+    PATH="$bin_dir:$PATH" \
+    APP_DIR_OVERRIDE="$app_dir" \
+    PKG_ROOT_OVERRIDE="$pkg_root" \
+    DIST_DIR_OVERRIDE="$dist_dir" \
+    UPDATER_BINARY_SOURCE="$updater_bin" \
+    PACKAGE_NAME="codex-cua-lab" \
+    PACKAGE_DISPLAY_NAME="Codex CUA Lab" \
+    PACKAGE_VERSION="2026.03.24.120000+deadbeef" \
+    "$REPO_DIR/scripts/build-deb.sh"
+
+    assert_file_exists "$dist_dir/codex-cua-lab_2026.03.24.120000+deadbeef_amd64.deb"
+    assert_file_exists "$pkg_root/usr/bin/codex-cua-lab"
+    assert_file_exists "$pkg_root/opt/codex-cua-lab/start.sh"
+    assert_contains "$pkg_root/DEBIAN/control" "Package: codex-cua-lab"
+    assert_contains "$pkg_root/usr/share/applications/codex-cua-lab.desktop" "Name=Codex CUA Lab"
+    assert_contains "$pkg_root/usr/share/applications/codex-cua-lab.desktop" "CHROME_DESKTOP=codex-cua-lab.desktop"
+    assert_contains "$pkg_root/usr/share/applications/codex-cua-lab.desktop" "/usr/bin/codex-cua-lab"
+    assert_contains "$pkg_root/opt/codex-cua-lab/.codex-linux/codex-packaged-runtime.sh" 'CHROME_DESKTOP="codex-cua-lab.desktop"'
 }
 
 test_rpm_builder_smoke() {
@@ -284,7 +343,7 @@ PLIST
 
 test_launcher_template_sanity() {
     info "Checking launcher template markers"
-    assert_contains "$REPO_DIR/install.sh" "python3 -m http.server 5175 --bind 127.0.0.1"
+    assert_contains "$REPO_DIR/install.sh" 'python3 -m http.server "$CODEX_LINUX_WEBVIEW_PORT" --bind 127.0.0.1'
     assert_contains "$REPO_DIR/install.sh" "WEBVIEW_PID_FILE"
     assert_contains "$REPO_DIR/install.sh" "owned_webview_server_pid"
     assert_contains "$REPO_DIR/install.sh" "discover_webview_server_pid"
@@ -343,14 +402,22 @@ if "Keeping the live app untouched" not in ensure_body:
 PY
     assert_contains "$REPO_DIR/install.sh" "warm_start_ipc_sent"
     assert_contains "$REPO_DIR/install.sh" "launcher_phase"
+    assert_contains "$REPO_DIR/install.sh" 'date +%s%N'
+    assert_contains "$REPO_DIR/install.sh" '10#$nanos / 1000000'
     assert_contains "$REPO_DIR/install.sh" "CODEX_SYNC_CLI_PREFLIGHT"
     assert_contains "$REPO_DIR/install.sh" "wait_for_webview_server"
     assert_contains "$REPO_DIR/install.sh" "verify_webview_origin"
     assert_contains "$REPO_DIR/install.sh" "Webview origin verified."
+    assert_contains "$REPO_DIR/install.sh" "hydrate_graphical_session_env"
     assert_not_contains "$REPO_DIR/install.sh" "pkill -f \"http.server 5175\""
-    assert_contains "$REPO_DIR/install.sh" "--app-id=codex-desktop"
-    assert_contains "$REPO_DIR/install.sh" "--ozone-platform-hint=auto"
+    assert_contains "$REPO_DIR/install.sh" "CODEX_WEBVIEW_PORT"
+    assert_contains "$REPO_DIR/install.sh" 'ELECTRON_RENDERER_URL="${ELECTRON_RENDERER_URL:-$WEBVIEW_ORIGIN/}"'
+    assert_contains "$REPO_DIR/install.sh" '--app-id="$CODEX_LINUX_APP_ID"'
+    assert_contains "$REPO_DIR/install.sh" "CODEX_APP_ID"
+    assert_contains "$REPO_DIR/install.sh" 'ELECTRON_OZONE_HINT="auto"'
+    assert_contains "$REPO_DIR/install.sh" '--ozone-platform-hint="$ELECTRON_OZONE_HINT"'
     assert_contains "$REPO_DIR/install.sh" "--disable-gpu-sandbox"
+    assert_contains "$REPO_DIR/install.sh" "--force-renderer-accessibility"
     assert_contains "$REPO_DIR/install.sh" "PACKAGED_RUNTIME_HELPER"
     assert_contains "$REPO_DIR/install.sh" "CODEX_INSTALL_ALLOW_RUNNING"
     assert_contains "$REPO_DIR/install.sh" "assert_install_target_not_running"
@@ -375,6 +442,45 @@ PY
     assert_contains "$REPO_DIR/scripts/build-rpm.sh" "stage_common_package_files"
     assert_contains "$REPO_DIR/scripts/build-rpm.sh" "PACKAGED_RUNTIME_SOURCE"
     assert_contains "$REPO_DIR/packaging/linux/codex-desktop.desktop" "BAMF_DESKTOP_FILE_HINT"
+}
+
+test_side_by_side_launcher_identity() {
+    info "Checking side-by-side launcher identity"
+    local workspace="$TMP_DIR/side-by-side-launcher"
+    local app_dir="$workspace/codex-cua-lab-app"
+    local bin_dir="$workspace/bin"
+    local help_log="$workspace/help.log"
+    local symlink_help_log="$workspace/symlink-help.log"
+
+    mkdir -p "$app_dir" "$bin_dir"
+
+    CODEX_INSTALLER_SOURCE_ONLY=1 \
+    CODEX_APP_ID="codex-cua-lab" \
+    CODEX_APP_DISPLAY_NAME="Codex CUA Lab" \
+    CODEX_INSTALL_DIR="$app_dir" \
+    bash -c 'source "$1"; validate_app_identity; create_start_script' _ "$REPO_DIR/install.sh"
+
+    assert_file_exists "$app_dir/start.sh"
+    assert_contains "$app_dir/start.sh" "CODEX_LINUX_APP_ID=codex-cua-lab"
+    assert_contains "$app_dir/start.sh" "CODEX_LINUX_APP_DISPLAY_NAME=Codex\\\\ CUA\\\\ Lab"
+    assert_contains "$app_dir/start.sh" 'CODEX_LINUX_WEBVIEW_PORT=${CODEX_WEBVIEW_PORT:-5176}'
+    assert_contains "$app_dir/start.sh" 'WEBVIEW_ORIGIN="http://127.0.0.1:$CODEX_LINUX_WEBVIEW_PORT"'
+    assert_contains "$app_dir/start.sh" 'ELECTRON_RENDERER_URL="${ELECTRON_RENDERER_URL:-$WEBVIEW_ORIGIN/}"'
+    assert_contains "$app_dir/start.sh" "resolve_script_dir"
+    assert_contains "$app_dir/start.sh" "configure_side_by_side_app_env"
+    assert_contains "$app_dir/start.sh" 'XDG_CONFIG_HOME="${CODEX_XDG_CONFIG_HOME:-$APP_STATE_DIR/xdg-config}"'
+    assert_contains "$app_dir/start.sh" '--class="$CODEX_LINUX_APP_ID"'
+    assert_contains "$app_dir/start.sh" '--app-id="$CODEX_LINUX_APP_ID"'
+    assert_contains "$app_dir/start.sh" '--user-data-dir="${CODEX_ELECTRON_USER_DATA_DIR:-$APP_STATE_DIR/electron-user-data}"'
+    assert_contains "$app_dir/start.sh" "--force-renderer-accessibility"
+    assert_contains "$app_dir/start.sh" 'LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/$CODEX_LINUX_APP_ID"'
+    XDG_CACHE_HOME="$workspace/cache" XDG_STATE_HOME="$workspace/state" "$app_dir/start.sh" --help >"$help_log"
+    assert_contains "$help_log" "Launches the Codex CUA Lab app."
+    assert_contains "$help_log" "codex-cua-lab/launcher.log"
+
+    ln -s "$app_dir/start.sh" "$bin_dir/codex-cua-lab"
+    XDG_CACHE_HOME="$workspace/cache" XDG_STATE_HOME="$workspace/state" "$bin_dir/codex-cua-lab" --help >"$symlink_help_log"
+    assert_contains "$symlink_help_log" "Launches the Codex CUA Lab app."
 }
 
 make_fake_extracted_asar() {
@@ -1222,6 +1328,30 @@ for (const [name, variant] of variants) {
 NODE
 }
 
+test_linux_computer_use_gate_patch_smoke() {
+    info "Checking Linux Computer Use plugin gate patch behavior"
+    local workspace="$TMP_DIR/computer-use-gate-patch"
+    local extracted="$workspace/extracted"
+    local output_log="$workspace/output.log"
+    local bundle_body
+
+    mkdir -p "$workspace"
+    bundle_body="$(cat <<'JS'
+let n={app:{whenReady(){},quit(){},requestSingleInstanceLock(){},on(){},off(){}}};
+let Qt=`openai-bundled`,$t=`browser-use`,en=`chrome-internal`,tn=`computer-use`,nn=`latex-tectonic`;
+var $n=[{forceReload:!0,installWhenMissing:!0,name:$t,isEnabled:({features:e})=>e.browserAgentAvailable,migrate:cn},{name:en,isEnabled:({buildFlavor:e})=>rn(e)},{name:tn,isEnabled:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:wn},{name:nn,isEnabled:()=>!0}];
+JS
+)"
+    make_fake_extracted_asar "$extracted" "$bundle_body"
+
+    node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
+    assert_contains "$extracted/.vite/build/main-test.js" '(t===`darwin`||t===`linux`)&&e.computerUse'
+    assert_not_contains "$extracted/.vite/build/main-test.js" 't===`darwin`&&e.computerUse'
+
+    node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" '(t===`darwin`||t===`linux`)&&e.computerUse' '1'
+}
+
 test_linux_file_manager_patch_fails_soft() {
     info "Checking Linux file manager patch fallback"
     local workspace="$TMP_DIR/file-manager-patch-fallback"
@@ -1238,12 +1368,14 @@ test_linux_file_manager_patch_fails_soft() {
 main() {
     test_common_helper_sourcing
     test_deb_builder_smoke
+    test_deb_builder_respects_package_identity
     test_rpm_builder_smoke
     test_missing_input_failure
     test_make_build_app_uses_installer_download_flow_by_default
     test_installer_detects_electron_version_from_plist
     test_installer_keeps_electron_fallback_for_bad_metadata
     test_launcher_template_sanity
+    test_side_by_side_launcher_identity
     test_linux_file_manager_patch_smoke
     test_linux_translucent_sidebar_default_patch_smoke
     test_keybinds_settings_tab_patch_smoke
@@ -1251,6 +1383,7 @@ main() {
     test_linux_tray_patch_smoke
     test_browser_annotation_screenshot_patch_smoke
     test_linux_single_instance_patch_smoke
+    test_linux_computer_use_gate_patch_smoke
     test_linux_file_manager_patch_fails_soft
     info "All script smoke tests passed"
 }

@@ -14,7 +14,14 @@ use std::{
 use tokio::process::Command;
 use tracing::info;
 
-const REQUIRED_BUNDLE_FILES: [(&str, &str); 6] = [
+const REQUIRED_BUNDLE_FILES: [(&str, &str); 10] = [
+    ("Cargo.toml", "Cargo.toml"),
+    ("Cargo.lock", "Cargo.lock"),
+    ("computer-use-linux", "computer-use-linux"),
+    (
+        "plugins/openai-bundled/plugins/computer-use",
+        "plugins/openai-bundled/plugins/computer-use",
+    ),
     ("install.sh", "install.sh"),
     ("scripts/build-deb.sh", "scripts/build-deb.sh"),
     (
@@ -403,6 +410,30 @@ touch "${DIST_DIR_OVERRIDE}/codex-desktop-${VER}-1-x86_64.pkg.tar.zst"
         Ok(())
     }
 
+    fn write_fake_computer_use_bundle(root: &Path) -> Result<()> {
+        fs::write(root.join("Cargo.toml"), b"[workspace]\nmembers = []\n")?;
+        fs::write(root.join("Cargo.lock"), b"# fake lock\n")?;
+        fs::create_dir_all(root.join("computer-use-linux/src"))?;
+        fs::write(
+            root.join("computer-use-linux/Cargo.toml"),
+            b"[package]\nname = \"codex-computer-use-linux\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )?;
+        fs::write(
+            root.join("computer-use-linux/src/main.rs"),
+            b"fn main() {}\n",
+        )?;
+        fs::create_dir_all(root.join("plugins/openai-bundled/plugins/computer-use/.codex-plugin"))?;
+        fs::write(
+            root.join("plugins/openai-bundled/plugins/computer-use/.codex-plugin/plugin.json"),
+            b"{\"name\":\"computer-use\",\"version\":\"0.1.0\"}\n",
+        )?;
+        fs::write(
+            root.join("plugins/openai-bundled/plugins/computer-use/.mcp.json"),
+            b"{\"mcpServers\":{}}\n",
+        )?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn builds_update_with_fake_bundle() -> Result<()> {
         let temp = tempdir()?;
@@ -412,6 +443,7 @@ touch "${DIST_DIR_OVERRIDE}/codex-desktop-${VER}-1-x86_64.pkg.tar.zst"
         fs::create_dir_all(bundle_root.join("scripts/lib"))?;
         fs::create_dir_all(bundle_root.join("packaging/linux"))?;
         fs::create_dir_all(bundle_root.join("assets"))?;
+        write_fake_computer_use_bundle(&bundle_root)?;
         fs::write(bundle_root.join("assets/codex.png"), b"png")?;
         fs::write(
             bundle_root.join("packaging/linux/control"),
@@ -520,6 +552,7 @@ chmod +x "${CODEX_INSTALL_DIR}/start.sh"
         fs::create_dir_all(source_root.join("scripts/lib"))?;
         fs::create_dir_all(source_root.join("packaging/linux"))?;
         fs::create_dir_all(source_root.join("assets"))?;
+        write_fake_computer_use_bundle(&source_root)?;
         fs::write(source_root.join("install.sh"), b"#!/bin/bash\n")?;
         fs::write(source_root.join("scripts/build-deb.sh"), b"#!/bin/bash\n")?;
         fs::write(
@@ -545,6 +578,10 @@ chmod +x "${CODEX_INSTALL_DIR}/start.sh"
         assert!(destination_root.join("scripts/build-deb.sh").exists());
         assert!(destination_root
             .join("scripts/patch-linux-window-ui.js")
+            .exists());
+        assert!(destination_root.join("computer-use-linux").exists());
+        assert!(destination_root
+            .join("plugins/openai-bundled/plugins/computer-use/.mcp.json")
             .exists());
         assert!(!destination_root.join("scripts/build-rpm.sh").exists());
         assert!(!destination_root.join("scripts/build-pacman.sh").exists());

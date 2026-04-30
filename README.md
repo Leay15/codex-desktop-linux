@@ -230,6 +230,43 @@ Equivalent direct command:
 ./codex-app/start.sh
 ```
 
+For side-by-side development without touching the default app state, build a
+separate app id and launcher:
+
+```bash
+make build-dev-app
+./bin/codex-cua-lab
+```
+
+The default development identity is `codex-cua-lab`, display name `Codex CUA
+Lab`, and webview port `5176`. Override them with `DEV_APP_ID`,
+`DEV_APP_NAME`, and `CODEX_WEBVIEW_PORT` when needed.
+
+### Linux Computer Use
+
+The Linux build stages a bundled `computer-use` plugin with a native
+`codex-computer-use-linux` MCP backend. The current backend registers the
+Computer Use tools, reports desktop readiness, and can enable GNOME
+accessibility for AT-SPI discovery:
+
+```bash
+./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux doctor
+./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux setup
+./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux apps
+./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux state Codex
+./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux screenshot
+```
+
+`setup` runs `gsettings set org.gnome.desktop.interface
+toolkit-accessibility true` through the user session bus. If target apps were
+already running, restart them if their accessibility tree is still empty.
+The launcher also passes `--force-renderer-accessibility` to Electron so web
+content controls are exposed to AT-SPI. The backend can capture screenshots
+through GNOME Shell or XDG Desktop Portal, read app trees, and send coordinate,
+element-index click/scroll, key, text, and drag input through `ydotool` when
+`ydotoold` is running. Native AT-SPI action/value support is the next
+implementation layer.
+
 ### 2. Build a native package
 
 Build the package that matches the current distro automatically:
@@ -435,8 +472,8 @@ The macOS Codex app is an Electron application. The core code (`app.asar`) is pl
 
 The installer replaces the macOS Electron with a Linux build and recompiles the native modules using `@electron/rebuild`. The `sparkle` module is removed because it is macOS-only.
 
-The extracted app expects a local webview origin on `127.0.0.1:5175`, so the launcher starts `python3 -m http.server 5175 --bind 127.0.0.1` from `content/webview/`, waits for the socket to become reachable, and only then launches Electron. The launcher tracks the owned webview server PID under XDG state, rediscovers an orphaned server from the same `content/webview/` directory, and reuses an already verified server instead of killing every process that matches the port.
-The launcher also verifies that `http://127.0.0.1:5175/index.html` contains the expected Codex startup markers before cold-starting Electron, so a port collision or incomplete extracted webview fails fast in `launcher.log` instead of hanging on the splash screen. If an existing Electron process is detected, the launcher uses a warm-start handoff path and lets the app's single-instance handler focus the running window.
+The extracted app expects a local webview origin, so the launcher starts `python3 -m http.server "$CODEX_LINUX_WEBVIEW_PORT" --bind 127.0.0.1` from `content/webview/`, exports `ELECTRON_RENDERER_URL`, waits for the socket to become reachable, and only then launches Electron. The default app uses port `5175`; side-by-side app IDs default to `5176`, and `CODEX_WEBVIEW_PORT` can override either value. The launcher tracks the owned webview server PID under XDG state, rediscovers an orphaned server from the same `content/webview/` directory, and reuses an already verified server instead of killing every process that matches the port.
+The launcher also verifies that `http://127.0.0.1:$CODEX_LINUX_WEBVIEW_PORT/index.html` contains the expected Codex startup markers before cold-starting Electron, so a port collision or incomplete extracted webview fails fast in `launcher.log` instead of hanging on the splash screen. If an existing Electron process is detected, the launcher uses a warm-start handoff path and lets the app's single-instance handler focus the running window.
 
 Native-package-only launcher behavior such as desktop-entry hints, `codex-update-manager` session bootstrapping, and the background launch-time update check lives in `packaging/linux/codex-packaged-runtime.sh`, which the generated launcher loads only when present inside a packaged install.
 
@@ -447,9 +484,9 @@ The current evaluation for a future Rust replacement for the local webview serve
 | Problem | Solution |
 |---------|----------|
 | `Error: write EPIPE` | Run `start.sh` directly instead of piping output |
-| Blank window | Check whether port 5175 is already in use: `ss -tlnp \| grep 5175` |
-| `ERR_CONNECTION_REFUSED` on `:5175` | The webview HTTP server failed to start. Ensure `python3` works and port 5175 is free |
-| Stuck on the Codex logo splash | Check `~/.cache/codex-desktop/launcher.log`. If webview origin validation failed, another process is probably serving port `5175` or the extracted `content/webview/` bundle is incomplete |
+| Blank window | Check whether the configured webview port is already in use: `ss -tlnp \| grep -E '5175\|5176'` |
+| `ERR_CONNECTION_REFUSED` on the webview port | The webview HTTP server failed to start. Ensure `python3` works and the configured port is free |
+| Stuck on the Codex logo splash | Check `~/.cache/codex-desktop/launcher.log`. If webview origin validation failed, another process is probably serving the configured webview port or the extracted `content/webview/` bundle is incomplete |
 | `CODEX_CLI_PATH` error | Install the CLI with `npm i -g @openai/codex` or `npm i -g --prefix ~/.local @openai/codex` |
 | Electron hangs while the CLI is outdated | Re-run the launcher and check `~/.cache/codex-desktop/launcher.log` plus `~/.local/state/codex-update-manager/service.log`; the launcher now runs a best-effort CLI preflight and warns if the automatic refresh fails |
 | GPU/Vulkan/Wayland errors | Under Wayland with `DISPLAY` available, the launcher uses `--ozone-platform=x11` for Electron window-positioning compatibility. Otherwise it uses `--ozone-platform-hint=auto`. GPU sandbox/compositing are disabled by default. |

@@ -7,8 +7,17 @@ set -Eeuo pipefail
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CODEX_APP_ID="${CODEX_APP_ID:-codex-desktop}"
+CODEX_APP_DISPLAY_NAME="${CODEX_APP_DISPLAY_NAME:-Codex Desktop}"
 INSTALL_ROOT="${CODEX_INSTALL_ROOT:-$SCRIPT_DIR}"
-INSTALL_DIR="${CODEX_INSTALL_DIR:-$INSTALL_ROOT/codex-app}"
+DEFAULT_INSTALL_DIR_NAME="codex-app"
+DEFAULT_CODEX_WEBVIEW_PORT=5175
+if [ "$CODEX_APP_ID" != "codex-desktop" ]; then
+    DEFAULT_INSTALL_DIR_NAME="$CODEX_APP_ID-app"
+    DEFAULT_CODEX_WEBVIEW_PORT=5176
+fi
+INSTALL_DIR="${CODEX_INSTALL_DIR:-$INSTALL_ROOT/$DEFAULT_INSTALL_DIR_NAME}"
+CODEX_WEBVIEW_PORT="${CODEX_WEBVIEW_PORT:-$DEFAULT_CODEX_WEBVIEW_PORT}"
 ELECTRON_VERSION="41.3.0"
 WORK_DIR="$(mktemp -d)"
 ARCH="$(uname -m)"
@@ -66,6 +75,10 @@ Environment variables:
   CODEX_INSTALL_DIR   Override the install directory (default: ./codex-app)
   CODEX_INSTALL_ALLOW_RUNNING=1
                       Allow overwriting INSTALL_DIR while Codex is running
+  CODEX_APP_ID        Override Linux app id/bin identity (default: codex-desktop)
+  CODEX_APP_DISPLAY_NAME
+                      Override display name (default: Codex Desktop)
+  CODEX_WEBVIEW_PORT  Override webview HTTP port (default: 5175, or 5176 for non-default app ids)
 
 After install, launch with:
   ./codex-app/start.sh
@@ -98,6 +111,29 @@ parse_args() {
     done
 }
 
+validate_app_identity() {
+    case "$CODEX_APP_ID" in
+        ""|*[^A-Za-z0-9._-]*)
+            error "CODEX_APP_ID must contain only letters, numbers, dots, underscores, and hyphens"
+            ;;
+    esac
+
+    [ -n "$CODEX_APP_DISPLAY_NAME" ] || error "CODEX_APP_DISPLAY_NAME must not be empty"
+
+    case "$CODEX_WEBVIEW_PORT" in
+        ""|*[!0-9]*)
+            error "CODEX_WEBVIEW_PORT must be a TCP port number"
+            ;;
+    esac
+    if [ "$CODEX_WEBVIEW_PORT" -lt 1 ] || [ "$CODEX_WEBVIEW_PORT" -gt 65535 ]; then
+        error "CODEX_WEBVIEW_PORT must be between 1 and 65535"
+    fi
+}
+
+shell_quote() {
+    printf '%q' "$1"
+}
+
 canonical_path() {
     realpath -m "$1"
 }
@@ -127,7 +163,7 @@ pid_matches_install_target() {
 
 find_running_install_target_pid() {
     local electron_path="$INSTALL_DIR/electron"
-    local app_pid_file="${XDG_STATE_HOME:-$HOME/.local/state}/codex-desktop/app.pid"
+    local app_pid_file="${XDG_STATE_HOME:-$HOME/.local/state}/$CODEX_APP_ID/app.pid"
     local pid
     local proc_exe
 
@@ -474,7 +510,81 @@ install_app() {
     info "app.asar installed"
 }
 
-# ---- Install Browser Use bundled plugin resources ----
+# ---- Install Linux-safe bundled plugin resources ----
+find_cargo_for_linux_computer_use() {
+    if command -v cargo >/dev/null 2>&1; then
+        command -v cargo
+        return 0
+    fi
+
+    if [ -x "$HOME/.cargo/bin/cargo" ]; then
+        echo "$HOME/.cargo/bin/cargo"
+        return 0
+    fi
+
+    return 1
+}
+
+build_linux_computer_use_backend() {
+    local crate_dir="$SCRIPT_DIR/computer-use-linux"
+    local backend_binary="$SCRIPT_DIR/target/release/codex-computer-use-linux"
+    local cargo_cmd=""
+
+    if [ ! -d "$crate_dir" ]; then
+        warn "Linux Computer Use backend source not found at $crate_dir"
+        return 1
+    fi
+
+    if ! cargo_cmd="$(find_cargo_for_linux_computer_use)"; then
+        warn "cargo not found; Linux Computer Use plugin will be unavailable"
+        return 1
+    fi
+
+    info "Building Linux Computer Use backend..."
+    if ! (cd "$SCRIPT_DIR" && "$cargo_cmd" build --release -p codex-computer-use-linux >&2); then
+        warn "Failed to build Linux Computer Use backend"
+        return 1
+    fi
+
+    [ -x "$backend_binary" ] || {
+        warn "Linux Computer Use backend binary missing after build: $backend_binary"
+        return 1
+    }
+
+    echo "$backend_binary"
+}
+
+stage_linux_computer_use_plugin() {
+    local target_plugins="$1"
+    local plugin_template="$SCRIPT_DIR/plugins/openai-bundled/plugins/computer-use"
+    local backend_binary=""
+    local target_plugin="$target_plugins/computer-use"
+
+    if [ ! -d "$plugin_template" ]; then
+        warn "Linux Computer Use plugin template not found at $plugin_template"
+        return 1
+    fi
+
+    if ! backend_binary="$(build_linux_computer_use_backend)"; then
+        return 1
+    fi
+
+    rm -rf "$target_plugin"
+    mkdir -p "$target_plugin"
+    cp -R "$plugin_template/." "$target_plugin/"
+    mkdir -p "$target_plugin/bin"
+    cp "$backend_binary" "$target_plugin/bin/codex-computer-use-linux"
+    chmod 0755 "$target_plugin/bin/codex-computer-use-linux"
+
+    if [ -f "$ICON_SOURCE" ]; then
+        mkdir -p "$target_plugin/assets"
+        cp "$ICON_SOURCE" "$target_plugin/assets/app-icon.png"
+    fi
+
+    find "$target_plugin" \( -name '*:com.apple.*' -o -name '.gitkeep' \) -delete
+    return 0
+}
+
 is_elf_executable() {
     local file="$1"
     python3 - "$file" <<'PY'
@@ -512,81 +622,162 @@ remove_macos_sidecar_files() {
     find "$root" -type f -name '*:com.apple.*' -delete
 }
 
-write_browser_use_marketplace() {
+write_bundled_plugins_marketplace() {
     local source="$1"
     local destination="$2"
+    local include_browser="$3"
+    local include_computer_use="$4"
 
-    node - "$source" "$destination" <<'NODE'
+    node - "$source" "$destination" "$include_browser" "$include_computer_use" <<'NODE'
 const fs = require("fs");
 const path = require("path");
 
 const sourcePath = process.argv[2];
 const destinationPath = process.argv[3];
+const includeBrowser = process.argv[4] === "1";
+const includeComputerUse = process.argv[5] === "1";
 const marketplace = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
-marketplace.plugins = (marketplace.plugins || []).filter((plugin) => plugin.name === "browser-use");
+const sourcePlugins = marketplace.plugins || [];
+const plugins = [];
 
-if (marketplace.plugins.length !== 1) {
-  throw new Error("Bundled marketplace does not contain exactly one browser-use plugin");
+if (includeBrowser) {
+  const browserUse = sourcePlugins.find((plugin) => plugin.name === "browser-use");
+  if (browserUse == null) {
+    throw new Error("Bundled marketplace does not contain browser-use plugin");
+  }
+  plugins.push(browserUse);
 }
 
+if (includeComputerUse) {
+  plugins.push({
+    name: "computer-use",
+    source: {
+      source: "local",
+      path: "./plugins/computer-use",
+    },
+    policy: {
+      installation: "AVAILABLE",
+      authentication: "ON_INSTALL",
+    },
+    category: "Productivity",
+  });
+}
+
+marketplace.plugins = plugins;
 fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
 fs.writeFileSync(destinationPath, `${JSON.stringify(marketplace, null, 2)}\n`);
 NODE
 }
 
-install_browser_use_resources() {
+install_bundled_plugin_resources() {
     local app_dir="$1"
     local upstream_resources="$app_dir/Contents/Resources"
     local source_marketplace="$upstream_resources/plugins/openai-bundled/.agents/plugins/marketplace.json"
     local source_plugin="$upstream_resources/plugins/openai-bundled/plugins/browser-use"
     local resources_dir="$INSTALL_DIR/resources"
     local bundled_plugins_dir="$resources_dir/plugins/openai-bundled"
+    local include_browser=0
+    local include_computer_use=0
 
-    if [ ! -d "$source_plugin" ] || [ ! -f "$source_marketplace" ]; then
-        warn "Browser Use bundled plugin resources not found in upstream app; skipping"
+    if [ ! -f "$source_marketplace" ]; then
+        warn "Bundled plugin marketplace not found in upstream app; skipping bundled plugins"
         return 0
     fi
 
     mkdir -p "$bundled_plugins_dir/plugins" "$bundled_plugins_dir/.agents/plugins"
-    rm -rf "$bundled_plugins_dir/plugins/browser-use"
-    cp -R "$source_plugin" "$bundled_plugins_dir/plugins/browser-use"
-    remove_macos_sidecar_files "$bundled_plugins_dir/plugins/browser-use"
-    write_browser_use_marketplace "$source_marketplace" "$bundled_plugins_dir/.agents/plugins/marketplace.json"
+
+    if [ -d "$source_plugin" ]; then
+        rm -rf "$bundled_plugins_dir/plugins/browser-use"
+        cp -R "$source_plugin" "$bundled_plugins_dir/plugins/browser-use"
+        remove_macos_sidecar_files "$bundled_plugins_dir/plugins/browser-use"
+        include_browser=1
+    else
+        warn "Browser Use bundled plugin resources not found in upstream app; skipping Browser Use"
+    fi
+
+    if stage_linux_computer_use_plugin "$bundled_plugins_dir/plugins"; then
+        include_computer_use=1
+    else
+        warn "Linux Computer Use plugin will be unavailable"
+    fi
+
+    if [ "$include_browser" -eq 0 ] && [ "$include_computer_use" -eq 0 ]; then
+        warn "No Linux-safe bundled plugins were staged"
+        return 0
+    fi
+
+    write_bundled_plugins_marketplace "$source_marketplace" "$bundled_plugins_dir/.agents/plugins/marketplace.json" "$include_browser" "$include_computer_use"
 
     install_linux_executable_resource "$upstream_resources/node" "$resources_dir/node" "node runtime" || true
     install_linux_executable_resource "$upstream_resources/node_repl" "$resources_dir/node_repl" "node_repl runtime" || true
 
-    info "Browser Use plugin resources installed"
+    info "Linux-safe bundled plugins installed"
 }
 
 # ---- Create start script ----
 create_start_script() {
-    cat > "$INSTALL_DIR/start.sh" << 'SCRIPT'
+    local quoted_app_id
+    local quoted_app_display_name
+    local quoted_webview_port
+    quoted_app_id="$(shell_quote "$CODEX_APP_ID")"
+    quoted_app_display_name="$(shell_quote "$CODEX_APP_DISPLAY_NAME")"
+    quoted_webview_port="$(shell_quote "$CODEX_WEBVIEW_PORT")"
+
+    cat > "$INSTALL_DIR/start.sh" << SCRIPT
 #!/bin/bash
 set -euo pipefail
 
-SOURCE_PATH="${BASH_SOURCE[0]}"
-while [ -L "$SOURCE_PATH" ]; do
-    SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
-    SOURCE_PATH="$(readlink "$SOURCE_PATH")"
-    [[ "$SOURCE_PATH" != /* ]] && SOURCE_PATH="$SOURCE_DIR/$SOURCE_PATH"
-done
-SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+CODEX_LINUX_APP_ID=$quoted_app_id
+CODEX_LINUX_APP_DISPLAY_NAME=$quoted_app_display_name
+CODEX_LINUX_WEBVIEW_PORT=\${CODEX_WEBVIEW_PORT:-$quoted_webview_port}
+SCRIPT
+
+    cat >> "$INSTALL_DIR/start.sh" << 'SCRIPT'
+resolve_script_dir() {
+    local source="${BASH_SOURCE[0]}"
+    local dir
+
+    while [ -L "$source" ]; do
+        dir="$(cd -P "$(dirname "$source")" && pwd)"
+        source="$(readlink "$source")"
+        case "$source" in
+            /*) ;;
+            *) source="$dir/$source" ;;
+        esac
+    done
+
+    cd -P "$(dirname "$source")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_script_dir)"
 WEBVIEW_DIR="$SCRIPT_DIR/content/webview"
-LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/codex-desktop"
+LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/$CODEX_LINUX_APP_ID"
 LOG_FILE="$LOG_DIR/launcher.log"
-APP_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/codex-desktop"
+APP_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$CODEX_LINUX_APP_ID"
 APP_SETTINGS_FILE="$APP_CONFIG_DIR/settings.json"
-APP_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codex-desktop"
+APP_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$CODEX_LINUX_APP_ID"
 APP_PID_FILE="$APP_STATE_DIR/app.pid"
 WEBVIEW_PID_FILE="$APP_STATE_DIR/webview.pid"
-LAUNCH_ACTION_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$APP_STATE_DIR}/codex-desktop"
+LAUNCH_ACTION_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$APP_STATE_DIR}/$CODEX_LINUX_APP_ID"
 LAUNCH_ACTION_SOCKET="$LAUNCH_ACTION_RUNTIME_DIR/launch-action.sock"
 PACKAGED_RUNTIME_HELPER="$SCRIPT_DIR/.codex-linux/codex-packaged-runtime.sh"
-APP_NOTIFICATION_ICON_NAME="codex-desktop"
+APP_NOTIFICATION_ICON_NAME="$CODEX_LINUX_APP_ID"
 APP_NOTIFICATION_ICON_BUNDLE="$SCRIPT_DIR/.codex-linux/$APP_NOTIFICATION_ICON_NAME.png"
 APP_NOTIFICATION_ICON_SYSTEM="/usr/share/icons/hicolor/256x256/apps/$APP_NOTIFICATION_ICON_NAME.png"
 APP_NOTIFICATION_ICON_REPO="$SCRIPT_DIR/../assets/codex.png"
+
+case "$CODEX_LINUX_WEBVIEW_PORT" in
+    ""|*[!0-9]*)
+        echo "CODEX_WEBVIEW_PORT must be a TCP port number" >&2
+        exit 1
+        ;;
+esac
+if [ "$CODEX_LINUX_WEBVIEW_PORT" -lt 1 ] || [ "$CODEX_LINUX_WEBVIEW_PORT" -gt 65535 ]; then
+    echo "CODEX_WEBVIEW_PORT must be between 1 and 65535" >&2
+    exit 1
+fi
+
+WEBVIEW_ORIGIN="http://127.0.0.1:$CODEX_LINUX_WEBVIEW_PORT"
 
 mkdir -p "$LOG_DIR" "$APP_CONFIG_DIR" "$APP_STATE_DIR" "$LAUNCH_ACTION_RUNTIME_DIR"
 chmod 700 "$LAUNCH_ACTION_RUNTIME_DIR" 2>/dev/null || true
@@ -598,10 +789,10 @@ RUNNING_APP_PID=""
 WARM_START=0
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    cat <<'HELP'
+    cat <<HELP
 Usage: ./start.sh [OPTIONS] [-- ELECTRON_FLAGS...]
 
-Launches the Codex Desktop app.
+Launches the $CODEX_LINUX_APP_DISPLAY_NAME app.
 
 Options:
   -h, --help                  Show this help message and exit
@@ -609,27 +800,34 @@ Options:
   --quick-chat                Open a projectless quick chat
   --prompt-chat               Show the compact prompt for a new chat
   --hotkey-window             Alias for --prompt-chat
-  --disable-gpu               Completely disable GPU acceleration
-  --disable-gpu-compositing   Disable GPU compositing (fixes flickering)
-  --ozone-platform=x11        Force X11/XWayland explicitly
+  --safe-mode                 X11 + software rendering fallback
+  --disable-gpu               Disable Electron GPU acceleration
+  --enable-gpu                Re-enable Electron GPU acceleration
+  --x11                       Force X11/XWayland
+  --wayland                   Force native Wayland
 
+Default launch keeps Electron GPU enabled and lets Electron choose the platform.
 Extra flags are passed directly to Electron.
 
-Logs: ~/.cache/codex-desktop/launcher.log
+Logs: ${XDG_CACHE_HOME:-$HOME/.cache}/$CODEX_LINUX_APP_ID/launcher.log
 HELP
     exit 0
 fi
 
 exec >>"$LOG_FILE" 2>&1
 
-echo "[$(date -Is)] Starting Codex Desktop launcher"
+echo "[$(date -Is)] Starting $CODEX_LINUX_APP_DISPLAY_NAME launcher"
 
 now_ms() {
-    local value
-    value="$(date +%s%3N 2>/dev/null || true)"
+    local value seconds nanos
+    value="$(date +%s%N 2>/dev/null || true)"
     case "$value" in
         *N*|"") echo "$(($(date +%s) * 1000))" ;;
-        *) echo "$value" ;;
+        *)
+            seconds="${value:0:${#value}-9}"
+            nanos="${value: -9}"
+            echo "$((seconds * 1000 + 10#$nanos / 1000000))"
+            ;;
     esac
 }
 
@@ -640,6 +838,82 @@ log_phase() {
     local elapsed_ms
     elapsed_ms="$(($(now_ms) - LAUNCHER_START_MS))"
     echo "[$(date -Is)] launcher_phase=$phase elapsedMs=$elapsed_ms"
+}
+
+import_graphical_env_entry() {
+    local entry="$1"
+    local name="${entry%%=*}"
+
+    [ "$entry" != "$name" ] || return 0
+
+    case "$name" in
+        DISPLAY|WAYLAND_DISPLAY|XDG_SESSION_TYPE|XDG_CURRENT_DESKTOP|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|DESKTOP_SESSION|XAUTHORITY)
+            if [ -z "${!name:-}" ]; then
+                export "$entry"
+            fi
+            ;;
+    esac
+}
+
+import_graphical_env_from_proc() {
+    local pid="$1"
+    local entry
+    local found_display=0
+
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    [ -r "/proc/$pid/environ" ] || return 1
+
+    while IFS= read -r -d '' entry; do
+        case "$entry" in
+            DISPLAY=*|WAYLAND_DISPLAY=*) found_display=1 ;;
+        esac
+        import_graphical_env_entry "$entry"
+    done < "/proc/$pid/environ"
+
+    [ "$found_display" -eq 1 ]
+}
+
+import_graphical_env_from_systemd_user() {
+    local entry
+    local found_display=0
+
+    command -v systemctl >/dev/null 2>&1 || return 1
+
+    while IFS= read -r entry; do
+        case "$entry" in
+            DISPLAY=*|WAYLAND_DISPLAY=*) found_display=1 ;;
+        esac
+        import_graphical_env_entry "$entry"
+    done < <(systemctl --user show-environment 2>/dev/null || true)
+
+    [ "$found_display" -eq 1 ]
+}
+
+discover_graphical_env_from_processes() {
+    local status_file
+    local pid
+    local uid
+
+    for status_file in /proc/[0-9]*/status; do
+        [ -e "$status_file" ] || continue
+        pid="${status_file#/proc/}"
+        pid="${pid%/status}"
+        uid="$(awk '/^Uid:/ {print $2}' "$status_file" 2>/dev/null || true)"
+        [ "$uid" = "$(id -u)" ] || continue
+        import_graphical_env_from_proc "$pid" && return 0
+    done
+
+    return 1
+}
+
+hydrate_graphical_session_env() {
+    if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        return 0
+    fi
+
+    import_graphical_env_from_systemd_user && return 0
+    discover_graphical_env_from_processes && return 0
+    return 0
 }
 
 linux_setting_enabled() {
@@ -854,10 +1128,10 @@ notify_error() {
     echo "$message"
     if command -v notify-send >/dev/null 2>&1; then
         notify-send \
-            -a "Codex Desktop" \
+            -a "$CODEX_LINUX_APP_DISPLAY_NAME" \
             -i "$icon" \
-            -h "string:desktop-entry:codex-desktop" \
-            "Codex Desktop" \
+            -h "string:desktop-entry:$CODEX_LINUX_APP_ID" \
+            "$CODEX_LINUX_APP_DISPLAY_NAME" \
             "$message"
     fi
 }
@@ -968,11 +1242,20 @@ PY
 }
 
 wait_for_webview_server() {
-    echo "Waiting for webview server on :5175"
+    echo "Waiting for webview server on :$CODEX_LINUX_WEBVIEW_PORT"
 
     local attempt
     for attempt in $(seq 1 50); do
-        if python3 -c "import socket; s=socket.socket(); s.settimeout(0.5); s.connect(('127.0.0.1', 5175)); s.close()" 2>/dev/null; then
+        if python3 - "$CODEX_LINUX_WEBVIEW_PORT" <<'PY' 2>/dev/null; then
+import socket
+import sys
+
+port = int(sys.argv[1])
+s = socket.socket()
+s.settimeout(0.5)
+s.connect(("127.0.0.1", port))
+s.close()
+PY
             echo "Webview server is ready"
             return 0
         fi
@@ -1012,7 +1295,7 @@ pid_is_webview_server() {
     [ -d "/proc/$pid" ] || return 1
     pid_is_current_user "$pid" || return 1
     cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-    [[ "$cmdline" == *"http.server 5175"* ]] || return 1
+    [[ "$cmdline" == *"http.server $CODEX_LINUX_WEBVIEW_PORT"* ]] || return 1
     cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
     [ "$cwd" = "$(canonical_path "$WEBVIEW_DIR")" ]
 }
@@ -1111,8 +1394,8 @@ ensure_webview_server() {
     fi
 
     if adopt_existing_webview_server; then
-        if verify_webview_origin "http://127.0.0.1:5175/index.html" >/dev/null 2>&1; then
-            echo "Reusing existing verified webview server on :5175"
+        if verify_webview_origin "$WEBVIEW_ORIGIN/index.html" >/dev/null 2>&1; then
+            echo "Reusing existing verified webview server on :$CODEX_LINUX_WEBVIEW_PORT"
             log_phase "webview_reused"
             return 0
         fi
@@ -1123,32 +1406,32 @@ ensure_webview_server() {
         fi
     fi
 
-    if verify_webview_origin "http://127.0.0.1:5175/index.html" >/dev/null 2>&1; then
-        notify_error "Codex Desktop webview port 5175 is already serving Codex content, but it is not owned by this launcher. Stop the other webview server and try again."
+    if verify_webview_origin "$WEBVIEW_ORIGIN/index.html" >/dev/null 2>&1; then
+        notify_error "$CODEX_LINUX_APP_DISPLAY_NAME webview port $CODEX_LINUX_WEBVIEW_PORT is already serving Codex content, but it is not owned by this launcher. Stop the other webview server and try again."
         exit 1
     fi
 
     stop_owned_webview_server
 
     cd "$WEBVIEW_DIR"
-    python3 -m http.server 5175 --bind 127.0.0.1 &
+    python3 -m http.server "$CODEX_LINUX_WEBVIEW_PORT" --bind 127.0.0.1 &
     STARTED_WEBVIEW_PID=$!
     echo "$STARTED_WEBVIEW_PID" > "$WEBVIEW_PID_FILE"
 
     echo "Started webview server pid=$STARTED_WEBVIEW_PID dir=$WEBVIEW_DIR"
 
     if ! wait_for_webview_server; then
-        notify_error "Codex Desktop webview server did not become ready on port 5175. Check the launcher log for the embedded http.server output."
+        notify_error "$CODEX_LINUX_APP_DISPLAY_NAME webview server did not become ready on port $CODEX_LINUX_WEBVIEW_PORT. Check the launcher log for the embedded http.server output."
         exit 1
     fi
 
     if ! kill -0 "$STARTED_WEBVIEW_PID" 2>/dev/null; then
-        notify_error "Codex Desktop webview server exited before Electron launch. Another process may already be using port 5175."
+        notify_error "$CODEX_LINUX_APP_DISPLAY_NAME webview server exited before Electron launch. Another process may already be using port $CODEX_LINUX_WEBVIEW_PORT."
         exit 1
     fi
 
-    if ! verify_webview_origin "http://127.0.0.1:5175/index.html"; then
-        notify_error "Codex Desktop webview origin validation failed. Another process may be serving port 5175 or the extracted webview bundle is incomplete."
+    if ! verify_webview_origin "$WEBVIEW_ORIGIN/index.html"; then
+        notify_error "$CODEX_LINUX_APP_DISPLAY_NAME webview origin validation failed. Another process may be serving port $CODEX_LINUX_WEBVIEW_PORT or the extracted webview bundle is incomplete."
         exit 1
     fi
 
@@ -1168,30 +1451,92 @@ clear_stale_pid_file() {
     fi
 }
 
-has_electron_flag() {
-    local flag_name="$1"
-    shift
+set_electron_defaults() {
+    ELECTRON_OZONE_PLATFORM=""
+    ELECTRON_OZONE_HINT="auto"
+    ELECTRON_GPU_ENABLED=1
+    ELECTRON_ARGS=()
 
-    local arg
-    for arg in "$@"; do
-        case "$arg" in
-            "$flag_name"|"$flag_name="*) return 0 ;;
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --safe-mode)
+                ELECTRON_OZONE_PLATFORM="x11"
+                ELECTRON_OZONE_HINT=""
+                ELECTRON_GPU_ENABLED=0
+                ;;
+            --disable-gpu)
+                ELECTRON_GPU_ENABLED=0
+                ;;
+            --enable-gpu)
+                ELECTRON_GPU_ENABLED=1
+                ;;
+            --x11)
+                ELECTRON_OZONE_PLATFORM="x11"
+                ELECTRON_OZONE_HINT=""
+                ;;
+            --wayland)
+                ELECTRON_OZONE_PLATFORM="wayland"
+                ELECTRON_OZONE_HINT=""
+                ;;
+            --ozone-platform=*)
+                ELECTRON_OZONE_PLATFORM="${1#--ozone-platform=}"
+                ELECTRON_OZONE_HINT=""
+                ;;
+            --ozone-platform-hint=*)
+                ELECTRON_OZONE_HINT="${1#--ozone-platform-hint=}"
+                ELECTRON_OZONE_PLATFORM=""
+                ;;
+            *)
+                ELECTRON_ARGS+=("$1")
+                ;;
         esac
+        shift
     done
-    return 1
 }
 
-resolve_ozone_platform_args() {
-    OZONE_PLATFORM_ARGS=()
-    if has_electron_flag "--ozone-platform" "$@" || has_electron_flag "--ozone-platform-hint" "$@"; then
+build_electron_launch_args() {
+    ELECTRON_LAUNCH_ARGS=(
+        --no-sandbox
+        --class="$CODEX_LINUX_APP_ID"
+        --app-id="$CODEX_LINUX_APP_ID"
+        --disable-dev-shm-usage
+        --disable-gpu-sandbox
+        --disable-gpu-compositing
+    )
+
+    if [ "$CODEX_LINUX_APP_ID" != "codex-desktop" ]; then
+        ELECTRON_LAUNCH_ARGS+=(--user-data-dir="${CODEX_ELECTRON_USER_DATA_DIR:-$APP_STATE_DIR/electron-user-data}")
+    elif [ -n "${CODEX_ELECTRON_USER_DATA_DIR:-}" ]; then
+        ELECTRON_LAUNCH_ARGS+=(--user-data-dir="$CODEX_ELECTRON_USER_DATA_DIR")
+    fi
+
+    if [ -n "$ELECTRON_OZONE_PLATFORM" ]; then
+        ELECTRON_LAUNCH_ARGS+=(--ozone-platform="$ELECTRON_OZONE_PLATFORM")
+    elif [ -n "$ELECTRON_OZONE_HINT" ]; then
+        ELECTRON_LAUNCH_ARGS+=(--ozone-platform-hint="$ELECTRON_OZONE_HINT")
+    fi
+
+    if [ "$ELECTRON_GPU_ENABLED" != "1" ]; then
+        ELECTRON_LAUNCH_ARGS+=(--disable-gpu --disable-features=Vulkan)
+    fi
+
+    if [ "${CODEX_FORCE_RENDERER_ACCESSIBILITY:-1}" = "1" ]; then
+        ELECTRON_LAUNCH_ARGS+=(--force-renderer-accessibility)
+    fi
+
+    if [ "$ELECTRON_OZONE_PLATFORM" = "wayland" ]; then
+        ELECTRON_LAUNCH_ARGS+=(--enable-features=WaylandWindowDecorations)
+    fi
+}
+
+configure_side_by_side_app_env() {
+    if [ "$CODEX_LINUX_APP_ID" = "codex-desktop" ]; then
         return 0
     fi
 
-    if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && [ -n "${DISPLAY:-}" ]; then
-        OZONE_PLATFORM_ARGS=(--ozone-platform=x11)
-    else
-        OZONE_PLATFORM_ARGS=(--ozone-platform-hint=auto)
-    fi
+    XDG_CONFIG_HOME="${CODEX_XDG_CONFIG_HOME:-$APP_STATE_DIR/xdg-config}"
+    CODEX_ELECTRON_USER_DATA_DIR="${CODEX_ELECTRON_USER_DATA_DIR:-$APP_STATE_DIR/electron-user-data}"
+    export XDG_CONFIG_HOME CODEX_ELECTRON_USER_DATA_DIR
 }
 
 cleanup_launcher() {
@@ -1212,33 +1557,18 @@ cleanup_launcher() {
 launch_electron() {
     cd "$SCRIPT_DIR"
     log_phase "electron_launch"
-    resolve_ozone_platform_args "$@"
-    if [ "${OZONE_PLATFORM_ARGS[0]:-}" = "--ozone-platform=x11" ]; then
-        echo "Using --ozone-platform=x11 for Wayland window positioning compatibility"
-    fi
+
+    set_electron_defaults "$@"
+    build_electron_launch_args
 
     if [ "$WARM_START" -eq 1 ]; then
-        "$SCRIPT_DIR/electron" \
-            --no-sandbox \
-            --class=codex-desktop \
-            --app-id=codex-desktop \
-            "${OZONE_PLATFORM_ARGS[@]}" \
-            --disable-gpu-sandbox \
-            --disable-gpu-compositing \
-            --enable-features=WaylandWindowDecorations \
-            "$@"
+        echo "Electron warm-start handoff: pid=$RUNNING_APP_PID ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED"
+        "$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}"
         return $?
     fi
 
-    "$SCRIPT_DIR/electron" \
-        --no-sandbox \
-        --class=codex-desktop \
-        --app-id=codex-desktop \
-        "${OZONE_PLATFORM_ARGS[@]}" \
-        --disable-gpu-sandbox \
-        --disable-gpu-compositing \
-        --enable-features=WaylandWindowDecorations \
-        "$@" &
+    echo "Electron launch mode: ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED"
+    "$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}" &
     ELECTRON_PID=$!
     if [ -n "${RUNNING_APP_PID:-}" ] && pid_matches_executable "$RUNNING_APP_PID" "$SCRIPT_DIR/electron"; then
         echo "Preserving Codex Desktop pid=$RUNNING_APP_PID liveness marker for second-instance handoff"
@@ -1254,6 +1584,8 @@ launch_electron() {
     return "$status"
 }
 
+hydrate_graphical_session_env
+configure_side_by_side_app_env
 load_packaged_runtime_helper
 clear_stale_pid_file
 detect_warm_start
@@ -1284,7 +1616,8 @@ if needs_cold_start && [ -z "${CODEX_CLI_PATH:-}" ]; then
     export CODEX_CLI_PATH
     log_phase "cli_lookup"
 fi
-export CHROME_DESKTOP="${CHROME_DESKTOP:-codex-desktop.desktop}"
+export CHROME_DESKTOP="${CHROME_DESKTOP:-$CODEX_LINUX_APP_ID.desktop}"
+export ELECTRON_RENDERER_URL="${ELECTRON_RENDERER_URL:-$WEBVIEW_ORIGIN/}"
 
 if needs_cold_start && [ -z "$CODEX_CLI_PATH" ]; then
     if prompt_install_missing_cli; then
@@ -1321,7 +1654,7 @@ SCRIPT
     chmod +x "$INSTALL_DIR/start.sh"
     mkdir -p "$INSTALL_DIR/.codex-linux"
     if [ -f "$ICON_SOURCE" ]; then
-        cp "$ICON_SOURCE" "$INSTALL_DIR/.codex-linux/codex-desktop.png"
+        cp "$ICON_SOURCE" "$INSTALL_DIR/.codex-linux/$CODEX_APP_ID.png"
     else
         warn "Notification icon not found at $ICON_SOURCE"
     fi
@@ -1336,6 +1669,7 @@ main() {
     echo ""                                             >&2
 
     parse_args "$@"
+    validate_app_identity
     check_deps
     assert_install_target_not_running
     prepare_install
@@ -1357,7 +1691,7 @@ main() {
     download_electron
     extract_webview "$app_dir"
     install_app
-    install_browser_use_resources "$app_dir"
+    install_bundled_plugin_resources "$app_dir"
     create_start_script
 
     if ! command -v codex &>/dev/null; then

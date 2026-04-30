@@ -65,11 +65,12 @@ main() {
     write_launcher_stub "$PKG_ROOT"
 
     sed \
+        -e "s/__PACKAGE_NAME__/$PACKAGE_NAME/g" \
         -e "s/__VERSION__/$PACKAGE_VERSION/g" \
         -e "s/__ARCH__/$arch/g" \
         "$CONTROL_TEMPLATE" > "$PKG_ROOT/DEBIAN/control"
     chmod 0644 "$PKG_ROOT/DEBIAN/control"
-    cp "$POSTINST_TEMPLATE" "$PKG_ROOT/DEBIAN/postinst"
+    sed -e "s|/opt/codex-desktop|/opt/$PACKAGE_NAME|g" "$POSTINST_TEMPLATE" > "$PKG_ROOT/DEBIAN/postinst"
     cp "$PRERM_TEMPLATE" "$PKG_ROOT/DEBIAN/prerm"
     cp "$POSTRM_TEMPLATE" "$PKG_ROOT/DEBIAN/postrm"
     chmod 0755 "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm"

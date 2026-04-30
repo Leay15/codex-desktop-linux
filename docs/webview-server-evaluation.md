@@ -2,7 +2,7 @@
 
 ## Context
 
-The current launcher starts a local `python3 -m http.server 5175` process for the extracted webview bundle. It kills any matching `http.server 5175` process first, restarts it with `nohup`, and waits for port `5175` to become reachable before launching Electron.
+The current launcher starts a local `python3 -m http.server "$CODEX_LINUX_WEBVIEW_PORT"` process for the extracted webview bundle. It waits for the configured port to become reachable before launching Electron, and exports `ELECTRON_RENDERER_URL` so side-by-side app IDs can use an isolated local origin.
 
 The extracted webview payload is a static bundle under `codex-app/content/webview` and is relatively large: about 35 MB across 693 files. The generated `index.html` references hashed assets through relative paths, so the app still expects a stable local origin.
 
@@ -12,7 +12,7 @@ The extracted webview payload is a static bundle under `codex-app/content/webvie
 
 What changes:
 
-- Keep `python3 -m http.server 5175`
+- Keep `python3 -m http.server "$CODEX_LINUX_WEBVIEW_PORT"`
 - Keep improving the current process lifecycle and readiness behavior
 - Improve port-collision handling and logging
 
@@ -82,13 +82,13 @@ Why this wins:
 If we later implement the recommended hardening or a Rust server, the change points are:
 
 - `install.sh` launcher generation
-- the local webview startup block around port `5175`
+- the local webview startup block around the configured webview port
 - packaging if a Rust server binary is added
 - launcher logging and cleanup logic around the PID file and `http.server` shutdown
 
 ## Risks To Watch
 
-- Port conflicts on `5175`
+- Port conflicts on the configured webview port
 - Stale launcher/server processes after crashes
 - Chromium waiting on a server that has not finished binding yet
 - Hidden assumptions in the extracted app about a localhost origin
@@ -104,6 +104,6 @@ If we later implement the recommended hardening or a Rust server, the change poi
 ## Future Test Plan
 
 - Launcher smoke test for start/stop/restart behavior
-- Port-collision test for `5175`
+- Port-collision test for the configured webview port
 - Stale-process cleanup test
 - Basic render test that verifies the webview assets are reachable from the expected origin

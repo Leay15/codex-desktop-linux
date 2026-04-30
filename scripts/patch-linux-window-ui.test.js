@@ -7,6 +7,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const {
+  applyLinuxComputerUsePluginGatePatch,
   applyLinuxFileManagerPatch,
   applyLinuxMenuPatch,
   applyLinuxOpaqueBackgroundPatch,
@@ -16,6 +17,8 @@ const {
   applyLinuxWindowOptionsPatch,
   patchMainBundleSource,
   patchExtractedApp,
+  patchPackageJson,
+  resolveDesktopName,
 } = require("./patch-linux-window-ui.js");
 
 const mainBundlePrefix =
@@ -49,6 +52,13 @@ function singleInstanceBundleFixture() {
   return [
     "agentRunId:process.env.CODEX_ELECTRON_AGENT_RUN_ID?.trim()||null}});let A=Date.now();await n.app.whenReady();",
     "l(e=>{R.deepLinks.queueProcessArgs(e)||ie()});let ae=",
+  ].join("");
+}
+
+function computerUseGateBundleFixture() {
+  return [
+    "var Qt=`openai-bundled`,$t=`browser-use`,en=`chrome-internal`,tn=`computer-use`,nn=`latex-tectonic`;",
+    "var $n=[{forceReload:!0,installWhenMissing:!0,name:$t,isEnabled:({features:e})=>e.browserAgentAvailable,migrate:cn},{name:en,isEnabled:({buildFlavor:e})=>rn(e)},{name:tn,isEnabled:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:wn},{name:nn,isEnabled:()=>!0}];",
   ].join("");
 }
 
@@ -146,6 +156,61 @@ test("adds Linux single-instance lock and second-instance handoff", () => {
   assert.match(patched, /n\.app\.off\(`second-instance`,codexLinuxSecondInstanceHandler\)/);
 });
 
+test("allows bundled Computer Use on Linux as well as macOS", () => {
+  const patched = applyPatchTwice(
+    applyLinuxComputerUsePluginGatePatch,
+    computerUseGateBundleFixture(),
+  );
+
+  assert.match(
+    patched,
+    /\{installWhenMissing:!0,name:tn,isEnabled:\(\{features:e,platform:t\}\)=>\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse/,
+  );
+  assert.doesNotMatch(patched, /t===`darwin`&&e\.computerUse/);
+});
+
+test("adds installWhenMissing to an already Linux-enabled Computer Use gate", () => {
+  const source = computerUseGateBundleFixture().replace(
+    "{name:tn,isEnabled:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:wn}",
+    "{name:tn,isEnabled:({features:e,platform:t})=>(t===`darwin`||t===`linux`)&&e.computerUse,migrate:wn}",
+  );
+
+  const patched = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, source);
+
+  assert.match(patched, /installWhenMissing:!0,name:tn/);
+  assert.equal((patched.match(/installWhenMissing:!0,name:tn/g) || []).length, 1);
+});
+
+test("uses CODEX_APP_ID for Electron desktopName", () => {
+  assert.equal(resolveDesktopName({}), "codex-desktop.desktop");
+  assert.equal(resolveDesktopName({ CODEX_APP_ID: "codex-cua-lab" }), "codex-cua-lab.desktop");
+  assert.throws(
+    () => resolveDesktopName({ CODEX_APP_ID: "bad/app" }),
+    /CODEX_APP_ID must contain only/,
+  );
+
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-desktop-name-test-"));
+  const previousAppId = process.env.CODEX_APP_ID;
+  try {
+    fs.writeFileSync(path.join(tempRoot, "package.json"), JSON.stringify({ name: "codex" }));
+    process.env.CODEX_APP_ID = "codex-cua-lab";
+
+    assert.equal(patchPackageJson(tempRoot), "codex-cua-lab.desktop");
+    assert.equal(patchPackageJson(tempRoot), "codex-cua-lab.desktop");
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(tempRoot, "package.json"), "utf8")).desktopName,
+      "codex-cua-lab.desktop",
+    );
+  } finally {
+    if (previousAppId == null) {
+      delete process.env.CODEX_APP_ID;
+    } else {
+      process.env.CODEX_APP_ID = previousAppId;
+    }
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("patchMainBundleSource keeps non-icon patches active without an icon asset", () => {
   const source = [
     mainBundlePrefix,
@@ -154,6 +219,7 @@ test("patchMainBundleSource keeps non-icon patches active without an icon asset"
     fileManagerBundle,
     trayBundleFixture(),
     singleInstanceBundleFixture(),
+    computerUseGateBundleFixture(),
   ].join("");
 
   const patched = applyPatchTwice(patchMainBundleSource, source, null);
@@ -165,6 +231,7 @@ test("patchMainBundleSource keeps non-icon patches active without an icon asset"
     /process\.platform!==`win32`&&process\.platform!==`darwin`&&process\.platform!==`linux`\?null:/,
   );
   assert.match(patched, /process\.platform===`linux`&&!n\.app\.requestSingleInstanceLock\(\)/);
+  assert.match(patched, /\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse/);
   assert.doesNotMatch(patched, /setIcon\(process\.resourcesPath\+`\/\.\.\/content\/webview\/assets\//);
   assert.doesNotMatch(
     patched,
