@@ -9,10 +9,128 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 ARCH="$(uname -m)"
+MIN_NODE_MAJOR=20
+NODEJS_MAJOR="${NODEJS_MAJOR:-22}"
 
 info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Node.js compatibility
+# ---------------------------------------------------------------------------
+node_major() {
+    command -v node &>/dev/null || return 1
+
+    local version major
+    version="$(node -v 2>/dev/null || true)"
+    major="${version#v}"
+    major="${major%%.*}"
+
+    case "$major" in
+        ''|*[!0-9]*) return 1 ;;
+        *) printf '%s\n' "$major" ;;
+    esac
+}
+
+has_compatible_nodejs() {
+    local major
+    major="$(node_major 2>/dev/null || true)"
+
+    [ -n "$major" ] \
+        && [ "$major" -ge "$MIN_NODE_MAJOR" ] \
+        && command -v npm &>/dev/null \
+        && command -v npx &>/dev/null
+}
+
+validate_nodejs_major() {
+    case "$NODEJS_MAJOR" in
+        ''|*[!0-9]*)
+            error "NODEJS_MAJOR must be numeric, for example: NODEJS_MAJOR=22 bash scripts/install-deps.sh"
+            ;;
+    esac
+
+    if [ "$NODEJS_MAJOR" -lt 22 ]; then
+        error "NODEJS_MAJOR=$NODEJS_MAJOR is not supported for apt bootstrap. Use Node.js 22 or newer.
+Existing user-managed Node.js 20 installations are still accepted by install.sh, but new bootstrap installs should use a maintained Node.js line."
+    fi
+}
+
+apt_arch_for_nodesource() {
+    local apt_arch
+    apt_arch="$(dpkg --print-architecture)"
+
+    case "$apt_arch" in
+        amd64|arm64|armhf)
+            printf '%s\n' "$apt_arch"
+            ;;
+        *)
+            error "NodeSource apt packages are not available for architecture '$apt_arch'.
+Install Node.js ${MIN_NODE_MAJOR}+ manually, then re-run this script."
+            ;;
+    esac
+}
+
+install_nodesource_nodejs() {
+    validate_nodejs_major
+
+    local apt_arch keyring source_list tmp_key
+    apt_arch="$(apt_arch_for_nodesource)"
+    keyring="/etc/apt/keyrings/nodesource.gpg"
+    source_list="/etc/apt/sources.list.d/nodesource.list"
+    tmp_key="$(mktemp)"
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp_key'" RETURN
+
+    info "Installing Node.js ${NODEJS_MAJOR}.x from NodeSource"
+    sudo apt-get install -y gnupg
+    sudo install -d -m 0755 /etc/apt/keyrings
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o "$tmp_key"
+    gpg --dearmor < "$tmp_key" | sudo tee "$keyring" >/dev/null
+    sudo chmod 0644 "$keyring"
+
+    printf 'deb [arch=%s signed-by=%s] https://deb.nodesource.com/node_%s.x nodistro main\n' \
+        "$apt_arch" "$keyring" "$NODEJS_MAJOR" \
+        | sudo tee "$source_list" >/dev/null
+
+    sudo apt-get update -qq
+    sudo apt-get install -y nodejs
+}
+
+report_nodejs_toolchain() {
+    info "Node.js toolchain available: node $(node -v), npm $(npm -v), npx $(npx -v)"
+}
+
+current_node_version_suffix() {
+    if command -v node &>/dev/null; then
+        printf ' but found %s' "$(node -v)"
+    fi
+}
+
+ensure_nodejs_compatible() {
+    local distro="$1"
+
+    if has_compatible_nodejs; then
+        report_nodejs_toolchain
+        return
+    fi
+
+    if [ "$distro" != "apt" ]; then
+        error "Node.js ${MIN_NODE_MAJOR}+ with npm and npx is required$(current_node_version_suffix).
+Install a supported Node.js version for this distro, then re-run this script."
+    fi
+
+    warn "Node.js ${MIN_NODE_MAJOR}+ with npm and npx is required$(current_node_version_suffix)"
+    install_nodesource_nodejs
+
+    if has_compatible_nodejs; then
+        report_nodejs_toolchain
+        return
+    fi
+
+    error "NodeSource install completed, but Node.js ${MIN_NODE_MAJOR}+ with npm and npx is still unavailable.
+Check apt output above or install Node.js ${MIN_NODE_MAJOR}+ manually."
+}
 
 # ---------------------------------------------------------------------------
 # Distro detection
@@ -40,7 +158,7 @@ install_apt() {
     info "Detected Debian/Ubuntu (apt)"
     sudo apt-get update -qq
     sudo apt-get install -y \
-        nodejs npm python3 \
+        ca-certificates python3 \
         p7zip-full curl unzip \
         build-essential
 }
@@ -132,7 +250,8 @@ Install 7zz manually from https://www.7-zip.org/download.html and ensure it is o
 
     local tmpdir
     tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmpdir'" EXIT
 
     info "Downloading 7zz ${version} from $url"
     curl -fL --progress-bar -o "$tmpdir/7z.tar.xz" "$url"
@@ -195,7 +314,8 @@ case "$DISTRO" in
     zypper)  install_zypper ;;
     *)
         error "Unsupported package manager. Install manually:
-  sudo apt install nodejs npm python3 p7zip-full curl unzip build-essential         # Debian/Ubuntu
+  # Debian/Ubuntu: install Node.js 20+ with npm/npx from NodeSource, nvm, or another compatible source, then:
+  sudo apt install python3 p7zip-full curl unzip build-essential                   # Debian/Ubuntu
   sudo dnf install nodejs npm python3 7zip curl unzip @development-tools            # Fedora 41+ (dnf5)
   sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip                # Fedora <41 (dnf)
     && sudo dnf groupinstall 'Development Tools'
@@ -205,6 +325,7 @@ case "$DISTRO" in
         ;;
 esac
 
+ensure_nodejs_compatible "$DISTRO"
 install_rust
 bootstrap_7zz
 

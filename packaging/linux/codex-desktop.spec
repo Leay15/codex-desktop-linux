@@ -5,7 +5,7 @@ Summary:        Codex Desktop for Linux
 License:        Proprietary
 ExclusiveArch:  __ARCH__
 
-Requires:       nodejs, npm, python3, p7zip, polkit, curl, unzip, gcc-c++, make
+Requires:       nodejs >= 20, npm, python3, p7zip, polkit, curl, unzip, gcc-c++, make
 Requires:       alsa-lib, at-spi2-atk, atk, glib2, gtk3, libdrm
 Requires:       nspr, nss, pango, libstdc++, libX11, libxcb
 Requires:       libXcomposite, libXdamage, libXext, libXfixes, libxkbcommon, libXrandr
