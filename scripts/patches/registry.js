@@ -13,6 +13,7 @@ const {
 } = require("../lib/linux-target-context.js");
 const {
   loadLinuxFeaturePatchDescriptors,
+  enabledLinuxFeatureIds,
 } = require("../lib/linux-features.js");
 const {
   findIconAsset,
@@ -38,6 +39,14 @@ const EXTRACTED_APP_WEBVIEW_SPLIT_ORDER = 2020;
 const CUSTOM_PATCH_POLICIES = [
   { name: "main-process-ui", ciPolicy: REQUIRED_UPSTREAM, phase: "main-bundle" },
 ];
+
+function recordMainProcessUiPatch(report, status, reason = null) {
+  recordPatch(report, "main-process-ui", status, reason, {
+    phase: "main-bundle",
+    ciPolicy: REQUIRED_UPSTREAM,
+    sourceKind: "core",
+  });
+}
 
 function normalizeDiscoveredCorePatchDescriptors(options = {}) {
   const root = options.corePatchRoot ?? CORE_PATCH_ROOT;
@@ -112,6 +121,9 @@ function patchExtractedApp(extractedDir, options = {}) {
   ]);
 
   setReportLinuxTarget(report, baseContext.linux);
+  if (report != null) {
+    report.enabledFeatures = enabledLinuxFeatureIds();
+  }
 
   const main = findMainBundle(extractedDir);
   if (report != null) {
@@ -121,7 +133,7 @@ function patchExtractedApp(extractedDir, options = {}) {
   if (main == null) {
     const reason = `Could not find main bundle in ${path.join(extractedDir, ".vite", "build")}`;
     console.warn(`WARN: ${reason} — skipping main-process UI patches`);
-    recordPatch(report, "main-process-ui", "failed-required", reason);
+    recordMainProcessUiPatch(report, "failed-required", reason);
   }
 
   const iconAsset = findIconAsset(extractedDir);
@@ -143,15 +155,21 @@ function patchExtractedApp(extractedDir, options = {}) {
   if (main != null) {
     const target = path.join(main.buildDir, main.mainBundle);
     const source = fs.readFileSync(target, "utf8");
-    const { patchedSource, warnings } = applyMainBundlePatches(source, assetContext, report);
+    const { patchedSource, warnings, coreWarnings } = applyMainBundlePatches(source, assetContext, report);
     if (patchedSource !== source) {
       fs.writeFileSync(target, patchedSource, "utf8");
     }
     recordPatch(
       report,
       "main-process-ui",
-      patchStatusFromChange(patchedSource !== source, warnings),
-      warnings[0] ?? null,
+      patchStatusFromChange(patchedSource !== source, coreWarnings, REQUIRED_UPSTREAM),
+      coreWarnings[0] ?? null,
+      {
+        phase: "main-bundle",
+        ciPolicy: REQUIRED_UPSTREAM,
+        sourceKind: "core",
+        ...(coreWarnings.length > 0 ? { warnings: [...coreWarnings] } : {}),
+      },
     );
   }
 
