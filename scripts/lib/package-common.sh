@@ -646,6 +646,8 @@ stage_common_package_files() {
     local root="$1"
     local app_root="$root/opt/$PACKAGE_NAME"
     local polkit_policy="$REPO_DIR/packaging/linux/com.github.ilysenko.codex-desktop-linux.update.policy"
+    local tray_icon_source="$ICON_SOURCE"
+    local candidate
 
     if package_with_updater_enabled; then
         ensure_file_exists "$polkit_policy" "polkit policy"
@@ -665,7 +667,14 @@ stage_common_package_files() {
     rm -rf "$app_root"
     cp -aT "$APP_DIR" "$app_root"
     mkdir -p "$app_root/.codex-linux"
+    for candidate in "$app_root"/content/webview/assets/app-*.png; do
+        if [ -f "$candidate" ]; then
+            tray_icon_source="$candidate"
+            break
+        fi
+    done
     cp "$ICON_SOURCE" "$app_root/.codex-linux/$PACKAGE_NAME.png"
+    cp "$tray_icon_source" "$app_root/.codex-linux/$PACKAGE_NAME-tray.png"
     render_desktop_entry_doctor_helper "$app_root/.codex-linux/codex-desktop-entry-doctor.sh"
     render_desktop_entry "$root/usr/share/applications/$PACKAGE_NAME.desktop"
     cp "$ICON_SOURCE" "$root/usr/share/icons/hicolor/256x256/apps/$PACKAGE_NAME.png"
