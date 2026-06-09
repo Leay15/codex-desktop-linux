@@ -365,6 +365,8 @@ function wrapFeaturePatchDescriptor(feature, descriptor, sourcePath, index, feat
     id: wrappedId,
     name: descriptor.name ?? wrappedId,
     ciPolicy: descriptor.ciPolicy ?? "optional",
+    sourceKind: "feature",
+    featureId: feature.id,
     order: descriptor.order ?? 20_000 + featureIndex * 100 + index * 10,
     sourcePath,
     apply: (target, context) => descriptor.apply(target, featureContext(context, feature)),
