@@ -61,8 +61,15 @@ function legacyCorePatchDescriptors(options = {}) {
   return corePatchDescriptors(options);
 }
 
-function featurePatchDescriptors() {
-  return normalizePatchDescriptors(loadLinuxFeaturePatchDescriptors());
+function featurePatchDescriptors(options = {}) {
+  return normalizePatchDescriptors(loadLinuxFeaturePatchDescriptors(options));
+}
+
+function featurePatchOptions(options = {}) {
+  return {
+    ...(options.featuresRoot != null ? { featuresRoot: options.featuresRoot } : {}),
+    ...(options.featuresConfigPath != null ? { featuresConfigPath: options.featuresConfigPath } : {}),
+  };
 }
 
 function createMainBundleContext(iconAsset, options = {}) {
@@ -75,6 +82,7 @@ function createMainBundleContext(iconAsset, options = {}) {
     linux,
     linuxTarget: linux,
     corePatchRoot: options.corePatchRoot,
+    featurePatchOptions: featurePatchOptions(options),
   };
 }
 
@@ -100,7 +108,7 @@ function mainBundlePatchDescriptors(context) {
   return normalizePatchDescriptors([
     ...corePatchDescriptors({ corePatchRoot: context.corePatchRoot })
       .filter((patch) => patch.phase === "main-bundle"),
-    ...featurePatchDescriptors().filter((patch) => patch.phase === "main-bundle"),
+    ...featurePatchDescriptors(context.featurePatchOptions).filter((patch) => patch.phase === "main-bundle"),
   ]);
 }
 
@@ -115,14 +123,15 @@ function patchMainBundleSource(source, iconAsset, options = {}) {
 function patchExtractedApp(extractedDir, options = {}) {
   const report = options.report ?? null;
   const baseContext = createMainBundleContext(null, options);
+  const featuresOptions = featurePatchOptions(options);
   const patchDescriptors = normalizePatchDescriptors([
     ...corePatchDescriptors({ corePatchRoot: options.corePatchRoot }),
-    ...featurePatchDescriptors(),
+    ...featurePatchDescriptors(featuresOptions),
   ]);
 
   setReportLinuxTarget(report, baseContext.linux);
   if (report != null) {
-    report.enabledFeatures = enabledLinuxFeatureIds();
+    report.enabledFeatures = enabledLinuxFeatureIds(featuresOptions);
   }
 
   const main = findMainBundle(extractedDir);
@@ -211,7 +220,7 @@ function allPatchPolicies(options = {}) {
       phase,
       appliesTo,
     })),
-    ...featurePatchDescriptors().map(({ id, name, ciPolicy, phase, appliesTo }) => ({
+    ...featurePatchDescriptors(featurePatchOptions(options)).map(({ id, name, ciPolicy, phase, appliesTo }) => ({
       name: name ?? id,
       ciPolicy,
       phase,
