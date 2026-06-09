@@ -35,7 +35,10 @@ function linuxFeaturesRoot(options = {}) {
   return defaultLinuxFeaturesRoot();
 }
 
-function linuxFeaturesConfigPath(featuresRoot) {
+function linuxFeaturesConfigPath(featuresRoot, options = {}) {
+  if (options.featuresConfigPath != null) {
+    return path.resolve(options.featuresConfigPath);
+  }
   if (process.env.CODEX_LINUX_FEATURES_CONFIG?.trim()) {
     return path.resolve(process.env.CODEX_LINUX_FEATURES_CONFIG.trim());
   }
@@ -105,7 +108,7 @@ function normalizeEnabledFeatureIds(value, sourcePath) {
 
 function enabledLinuxFeatureIds(options = {}) {
   const featuresRoot = linuxFeaturesRoot(options);
-  const configPath = linuxFeaturesConfigPath(featuresRoot);
+  const configPath = linuxFeaturesConfigPath(featuresRoot, options);
   if (!fs.existsSync(configPath)) {
     return [];
   }
