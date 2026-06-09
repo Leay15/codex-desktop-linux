@@ -68,6 +68,7 @@ const {
   corePatchDescriptors,
   detectLinuxTargetContext,
   discoverCorePatchDescriptors,
+  enabledLinuxFeatureIds,
   linuxTargetSummary,
   normalizePatchDescriptors,
   parseOsRelease,
@@ -88,6 +89,9 @@ const {
   packageProfile,
   sourceInfo,
 } = require("./lib/build-info.js");
+const {
+  summarizePatchReport,
+} = require("./lib/patch-report.js");
 const {
   applyBrowserAnnotationScreenshotPatch,
   applyLocalEnvironmentActionModalDraftPatch,
@@ -1639,11 +1643,21 @@ test("patches remaining Linux window icon snippets when another window is alread
 
 test("adds Linux tray support including the platform guard", () => {
   const iconPathExpression = "process.resourcesPath+`/../content/webview/assets/app-test.png`";
+  const packagedTrayIconPathExpression = "process.resourcesPath+`/../.codex-linux/codex-desktop-tray.png`";
+  const packagedAppIconPathExpression = "process.resourcesPath+`/../.codex-linux/codex-desktop.png`";
   const patched = applyPatchTwice(applyLinuxTrayPatch, trayBundleFixture(), iconPathExpression);
 
   assert.match(
     patched,
     /process\.platform!==`win32`&&process\.platform!==`darwin`&&process\.platform!==`linux`\?null:/,
+  );
+  assert.match(
+    patched,
+    new RegExp(`nativeImage\\.createFromPath\\(${escapeRegExp(packagedTrayIconPathExpression)}\\)`),
+  );
+  assert.match(
+    patched,
+    new RegExp(`nativeImage\\.createFromPath\\(${escapeRegExp(packagedAppIconPathExpression)}\\)`),
   );
   assert.match(
     patched,
@@ -1672,6 +1686,22 @@ test("adds Linux tray support including the platform guard", () => {
     /\(E\|\|process\.platform===`linux`&&\(typeof codexLinuxIsTrayEnabled!==`function`\|\|codexLinuxIsTrayEnabled\(\)\)\)&&oe\(\);/,
   );
   assert.doesNotMatch(patched, /process\.platform===`linux`&&codexLinuxIsTrayEnabled\(\)/);
+});
+
+test("adds Linux tray support even when About dialog already uses the bundled icon path", () => {
+  const iconPathExpression = "process.resourcesPath+`/../content/webview/assets/app-test.png`";
+  const packagedTrayIconPathExpression = "process.resourcesPath+`/../.codex-linux/codex-desktop-tray.png`";
+  const source = [
+    trayBundleFixture(),
+    "async function bZ(){let t=process.execPath;return process.platform===`linux`?Promise.resolve((()=>{let __codexLinuxAboutIcon=n.nativeImage.createFromPath(process.resourcesPath+`/../content/webview/assets/app-test.png`);return __codexLinuxAboutIcon.isEmpty()?null:__codexLinuxAboutIcon})()):n.app.getFileIcon(t,{size:process.platform===`win32`?`large`:`normal`}).catch(()=>null)}",
+  ].join("");
+
+  const patched = applyPatchTwice(applyLinuxTrayPatch, source, iconPathExpression);
+
+  assert.match(
+    patched,
+    new RegExp(`nativeImage\\.createFromPath\\(${escapeRegExp(packagedTrayIconPathExpression)}\\)`),
+  );
 });
 
 test("adds Linux build information to the tray menu", () => {
@@ -3978,11 +4008,44 @@ test("patchExtractedApp records a structured patch report", () => {
     assert.equal(report.mainBundle, "main.js");
     assert.equal(report.iconAsset, "app-test.png");
     assert.equal(report.desktopName, "codex-desktop.desktop");
-    assert.ok(report.patches.some((patch) => patch.name === "main-process-ui" && patch.status === "applied"));
+    assert.deepEqual(report.enabledFeatures, enabledLinuxFeatureIds());
+    assert.ok(
+      report.patches.some(
+        (patch) =>
+          patch.name === "main-process-ui" &&
+          patch.status === "failed-required" &&
+          patch.sourceKind === "core" &&
+          Array.isArray(patch.warnings) &&
+          patch.warnings.length > 0,
+      ),
+    );
     assert.ok(report.patches.some((patch) => patch.name === "keybinds-settings" && patch.status === "skipped-optional"));
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
+});
+
+test("patch report summary separates required core, optional core, and optional feature drift", () => {
+  const summary = summarizePatchReport({
+    enabledFeatures: ["remote-mobile-control"],
+    patches: [
+      { name: "main-process-ui", status: "applied", sourceKind: "core", ciPolicy: "required-upstream" },
+      { name: "linux-app-updater-bridge", status: "skipped-optional", sourceKind: "core", ciPolicy: "optional" },
+      {
+        name: "feature:remote-mobile-control:linux-remote-mobile-conversation-hydration",
+        status: "applied-with-warnings",
+        sourceKind: "feature",
+        featureId: "remote-mobile-control",
+        ciPolicy: "optional",
+      },
+    ],
+  });
+
+  assert.deepEqual(summary.enabledFeatures, ["remote-mobile-control"]);
+  assert.deepEqual(summary.groups.requiredCore.statusCounts, { applied: 1 });
+  assert.deepEqual(summary.groups.optionalCore.statusCounts, { "skipped-optional": 1 });
+  assert.deepEqual(summary.groups.optionalFeatures.statusCounts, { "applied-with-warnings": 1 });
+  assert.equal(summary.groups.optionalFeatures.byFeature["remote-mobile-control"].count, 1);
 });
 
 test("patch report marks missing required webview assets as required failures", () => {
