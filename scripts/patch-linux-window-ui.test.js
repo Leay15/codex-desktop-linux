@@ -106,6 +106,7 @@ const {
   applyLinuxWindowControlsSafeAreaPatch,
 } = require("./patches/webview-assets.js");
 const { patchAssetFiles } = require("./patches/shared.js");
+const { featurePatchDescriptors } = require("./patches/registry.js");
 
 const mainBundlePrefix =
   "let n=require(`electron`),i=require(`node:path`),o=require(`node:fs`);";
@@ -4020,6 +4021,107 @@ test("patchExtractedApp records a structured patch report", () => {
       ),
     );
     assert.ok(report.patches.some((patch) => patch.name === "keybinds-settings" && patch.status === "skipped-optional"));
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("feature patch descriptors honor explicit feature config overrides", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-feature-patch-override-"));
+  try {
+    const featuresRoot = path.join(tempRoot, "linux-features");
+    const featureDir = path.join(featuresRoot, "temp-feature");
+    const featureConfigPath = path.join(tempRoot, "custom-features.json");
+    fs.mkdirSync(featureDir, { recursive: true });
+    fs.writeFileSync(path.join(featuresRoot, "features.example.json"), JSON.stringify({ enabled: [] }));
+    fs.writeFileSync(
+      path.join(featureDir, "feature.json"),
+      JSON.stringify({
+        id: "temp-feature",
+        title: "Temp Feature",
+        defaultEnabled: false,
+        entrypoints: { patches: "./patch.js" },
+      }),
+    );
+    fs.writeFileSync(path.join(featureDir, "README.md"), "# Temp Feature\n");
+    fs.writeFileSync(
+      path.join(featureDir, "patch.js"),
+      [
+        "\"use strict\";",
+        "module.exports=[{",
+        "id:\"temp-feature-main-bundle\",",
+        "phase:\"main-bundle\",",
+        "ciPolicy:\"optional\",",
+        "apply:(source)=>source",
+        "}];",
+      ].join("\n"),
+    );
+    fs.writeFileSync(featureConfigPath, JSON.stringify({ enabled: ["temp-feature"] }));
+
+    const descriptors = featurePatchDescriptors({ featuresRoot, featuresConfigPath: featureConfigPath });
+    assert.ok(descriptors.some((descriptor) => descriptor.id === "feature:temp-feature:temp-feature-main-bundle"));
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("patchExtractedApp report honors explicit feature config overrides", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-patch-report-feature-override-"));
+  try {
+    const buildDir = path.join(tempRoot, ".vite", "build");
+    const assetsDir = path.join(tempRoot, "webview", "assets");
+    const featuresRoot = path.join(tempRoot, "linux-features");
+    const featureDir = path.join(featuresRoot, "temp-feature");
+    const featureConfigPath = path.join(tempRoot, "custom-features.json");
+    fs.mkdirSync(buildDir, { recursive: true });
+    fs.mkdirSync(assetsDir, { recursive: true });
+    fs.mkdirSync(featureDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(buildDir, "main.js"),
+      [
+        mainBundlePrefix,
+        "process.platform===`win32`&&k.removeMenu(),",
+        "codexTempFeatureDisabled()",
+      ].join(""),
+    );
+    fs.writeFileSync(path.join(assetsDir, "app-test.png"), "");
+    fs.writeFileSync(path.join(tempRoot, "package.json"), JSON.stringify({ name: "codex" }));
+    fs.writeFileSync(path.join(featuresRoot, "features.example.json"), JSON.stringify({ enabled: [] }));
+    fs.writeFileSync(
+      path.join(featureDir, "feature.json"),
+      JSON.stringify({
+        id: "temp-feature",
+        title: "Temp Feature",
+        defaultEnabled: false,
+        entrypoints: { patches: "./patch.js" },
+      }),
+    );
+    fs.writeFileSync(path.join(featureDir, "README.md"), "# Temp Feature\n");
+    fs.writeFileSync(
+      path.join(featureDir, "patch.js"),
+      [
+        "\"use strict\";",
+        "module.exports=[{",
+        "id:\"temp-feature-main-bundle\",",
+        "phase:\"main-bundle\",",
+        "ciPolicy:\"optional\",",
+        "apply:(source)=>source.includes(\"codexTempFeatureDisabled()\")?source.replace(\"codexTempFeatureDisabled()\",\"codexTempFeatureEnabled()\"):(source)",
+        "}];",
+      ].join("\n"),
+    );
+    fs.writeFileSync(featureConfigPath, JSON.stringify({ enabled: ["temp-feature"] }));
+
+    const report = createPatchReport();
+    patchExtractedApp(tempRoot, { report, featuresRoot, featuresConfigPath: featureConfigPath });
+
+    assert.deepEqual(report.enabledFeatures, ["temp-feature"]);
+    assert.ok(
+      report.patches.some(
+        (patch) =>
+          patch.name === "feature:temp-feature:temp-feature-main-bundle" && patch.status === "applied",
+      ),
+    );
+    assert.match(fs.readFileSync(path.join(buildDir, "main.js"), "utf8"), /codexTempFeatureEnabled\(\)/);
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
