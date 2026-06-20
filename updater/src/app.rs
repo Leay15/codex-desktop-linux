@@ -2794,10 +2794,12 @@ mod tests {
     #[test]
     fn user_session_bus_for_polkit_allows_user_service_env_without_display() {
         let _env_guard = crate::test_util::env_lock();
-        let original_display = std::env::var_os("DISPLAY");
-        let original_wayland_display = std::env::var_os("WAYLAND_DISPLAY");
-        let original_dbus_session_bus_address = std::env::var_os("DBUS_SESSION_BUS_ADDRESS");
-        let original_xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
+        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "XDG_RUNTIME_DIR",
+        ]);
 
         std::env::remove_var("DISPLAY");
         std::env::remove_var("WAYLAND_DISPLAY");
@@ -2805,27 +2807,6 @@ mod tests {
         std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
 
         assert!(has_user_session_bus_for_polkit());
-
-        if let Some(value) = original_display {
-            std::env::set_var("DISPLAY", value);
-        } else {
-            std::env::remove_var("DISPLAY");
-        }
-        if let Some(value) = original_wayland_display {
-            std::env::set_var("WAYLAND_DISPLAY", value);
-        } else {
-            std::env::remove_var("WAYLAND_DISPLAY");
-        }
-        if let Some(value) = original_dbus_session_bus_address {
-            std::env::set_var("DBUS_SESSION_BUS_ADDRESS", value);
-        } else {
-            std::env::remove_var("DBUS_SESSION_BUS_ADDRESS");
-        }
-        if let Some(value) = original_xdg_runtime_dir {
-            std::env::set_var("XDG_RUNTIME_DIR", value);
-        } else {
-            std::env::remove_var("XDG_RUNTIME_DIR");
-        }
     }
 
     #[test]
@@ -2874,15 +2855,16 @@ mod tests {
         };
         paths.ensure_dirs()?;
 
-        let original_display = std::env::var_os("DISPLAY");
-        let original_wayland_display = std::env::var_os("WAYLAND_DISPLAY");
-        let original_dbus_session_bus_address = std::env::var_os("DBUS_SESSION_BUS_ADDRESS");
-        let original_xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
-        let original_path = std::env::var_os("PATH");
-        let original_home = std::env::var_os("HOME");
-        let original_nvm_dir = std::env::var_os("NVM_DIR");
-        let original_skip_system_cli_lookup =
-            std::env::var_os("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP");
+        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "XDG_RUNTIME_DIR",
+            "PATH",
+            "HOME",
+            "NVM_DIR",
+            "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
+        ]);
 
         std::env::remove_var("DISPLAY");
         std::env::remove_var("WAYLAND_DISPLAY");
@@ -2900,47 +2882,6 @@ mod tests {
         state.cli_path = Some(invalid_cli_path);
 
         let outcome = prompt_install_cli(&mut state, &paths, None)?;
-
-        if let Some(value) = original_display {
-            std::env::set_var("DISPLAY", value);
-        } else {
-            std::env::remove_var("DISPLAY");
-        }
-        if let Some(value) = original_wayland_display {
-            std::env::set_var("WAYLAND_DISPLAY", value);
-        } else {
-            std::env::remove_var("WAYLAND_DISPLAY");
-        }
-        if let Some(value) = original_dbus_session_bus_address {
-            std::env::set_var("DBUS_SESSION_BUS_ADDRESS", value);
-        } else {
-            std::env::remove_var("DBUS_SESSION_BUS_ADDRESS");
-        }
-        if let Some(value) = original_xdg_runtime_dir {
-            std::env::set_var("XDG_RUNTIME_DIR", value);
-        } else {
-            std::env::remove_var("XDG_RUNTIME_DIR");
-        }
-        if let Some(value) = original_path {
-            std::env::set_var("PATH", value);
-        } else {
-            std::env::remove_var("PATH");
-        }
-        if let Some(value) = original_home {
-            std::env::set_var("HOME", value);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        if let Some(value) = original_nvm_dir {
-            std::env::set_var("NVM_DIR", value);
-        } else {
-            std::env::remove_var("NVM_DIR");
-        }
-        if let Some(value) = original_skip_system_cli_lookup {
-            std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", value);
-        } else {
-            std::env::remove_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP");
-        }
 
         assert_eq!(outcome, PromptInstallCliOutcome::NoBackend);
         Ok(())
