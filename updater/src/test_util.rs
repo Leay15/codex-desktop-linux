@@ -64,6 +64,9 @@ mod tests {
         });
 
         assert_eq!(std::env::var_os("DISPLAY"), original_display);
-        assert_eq!(std::env::var_os("WAYLAND_DISPLAY"), original_wayland_display);
+        assert_eq!(
+            std::env::var_os("WAYLAND_DISPLAY"),
+            original_wayland_display
+        );
     }
 }
