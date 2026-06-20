@@ -656,7 +656,7 @@ fn prompt_install_cli(
         return Ok(PromptInstallCliOutcome::Cancelled);
     }
 
-    if !has_graphical_session() {
+    if !has_interactive_graphical_session() {
         return Ok(PromptInstallCliOutcome::NoBackend);
     }
 
@@ -687,12 +687,17 @@ fn recently_dismissed_cli_prompt(state: &PersistedState) -> bool {
     })
 }
 
-fn has_graphical_session() -> bool {
+fn has_interactive_graphical_session() -> bool {
     let has_display =
         std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
     let has_dbus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
         || std::env::var_os("XDG_RUNTIME_DIR").is_some();
     has_display && has_dbus
+}
+
+fn has_user_session_bus_for_polkit() -> bool {
+    std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
+        || std::env::var_os("XDG_RUNTIME_DIR").is_some()
 }
 
 fn prefers_kdialog() -> bool {
@@ -1647,7 +1652,7 @@ fn graphical_polkit_auth_agent_is_likely_available() -> bool {
     if std::env::var_os("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT").is_some() {
         return true;
     }
-    if !has_graphical_session() {
+    if !has_user_session_bus_for_polkit() {
         return false;
     }
     polkit_auth_agent_process_is_running()
@@ -2784,6 +2789,43 @@ mod tests {
         assert!(!process_text_matches_polkit_auth_agent(
             "/usr/bin/ssh-agent -D"
         ));
+    }
+
+    #[test]
+    fn user_session_bus_for_polkit_allows_user_service_env_without_display() {
+        let _env_guard = crate::test_util::env_lock();
+        let original_display = std::env::var_os("DISPLAY");
+        let original_wayland_display = std::env::var_os("WAYLAND_DISPLAY");
+        let original_dbus_session_bus_address = std::env::var_os("DBUS_SESSION_BUS_ADDRESS");
+        let original_xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
+
+        std::env::remove_var("DISPLAY");
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus");
+        std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
+
+        assert!(has_user_session_bus_for_polkit());
+
+        if let Some(value) = original_display {
+            std::env::set_var("DISPLAY", value);
+        } else {
+            std::env::remove_var("DISPLAY");
+        }
+        if let Some(value) = original_wayland_display {
+            std::env::set_var("WAYLAND_DISPLAY", value);
+        } else {
+            std::env::remove_var("WAYLAND_DISPLAY");
+        }
+        if let Some(value) = original_dbus_session_bus_address {
+            std::env::set_var("DBUS_SESSION_BUS_ADDRESS", value);
+        } else {
+            std::env::remove_var("DBUS_SESSION_BUS_ADDRESS");
+        }
+        if let Some(value) = original_xdg_runtime_dir {
+            std::env::set_var("XDG_RUNTIME_DIR", value);
+        } else {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
     }
 
     #[test]
