@@ -2906,7 +2906,7 @@ test("Linux device-key store serializes concurrent updates", async () => {
     const { directory, lock, store } = remoteControlKeyStorePaths(configHome);
     const persisted = JSON.parse(fs.readFileSync(store, "utf8"));
 
-    assert.equal(persisted.version, 1);
+    assert.equal(persisted.version, 2);
     assert.deepEqual(new Set(Object.keys(persisted.keys)), new Set(created.map((key) => key.keyId)));
     assert.equal(fs.statSync(directory).mode & 0o777, 0o700);
     assert.equal(fs.statSync(store).mode & 0o777, 0o600);
@@ -3083,7 +3083,7 @@ test("Linux device-key store migrates the legacy schema on the next write", asyn
 
     const second = await client.createDeviceKey("allow_os_protected_nonextractable");
     const migrated = JSON.parse(fs.readFileSync(store, "utf8"));
-    assert.equal(migrated.version, 1);
+    assert.equal(migrated.version, 2);
     assert.ok(migrated.keys[first.keyId]);
     assert.ok(migrated.keys[second.keyId]);
   } finally {
@@ -3274,7 +3274,7 @@ test("Linux device-key store enforces its schema and key-count boundary", async 
     await assert.rejects(() => client.getDeviceKeyPublic("key-0"), /record is invalid/);
 
     persisted.keys["key-0"] = { ...record, keyId: "key-0" };
-    persisted.version = 2;
+    persisted.version = 3;
     fs.writeFileSync(store, `${JSON.stringify(persisted)}\n`, { mode: 0o600 });
     await assert.rejects(() => client.getDeviceKeyPublic("key-0"), /schema is invalid/);
   } finally {

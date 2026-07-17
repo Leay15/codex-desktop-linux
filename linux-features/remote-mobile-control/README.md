@@ -61,6 +61,20 @@ What it changes:
   crash-durable atomic replacement, and rejected when the store has unsafe
   ownership, permissions, file types, schema, or size. An existing key file at
   the previous location is moved into the private directory on first use.
+- Encrypts private key material with Electron `safeStorage` when the Linux
+  desktop exposes GNOME Secret Service/libsecret or KWallet. The hardened JSON
+  store keeps only public metadata and a base64 ciphertext in that mode.
+- Records the selected storage backend (`gnome_libsecret`, `kwallet`,
+  `kwallet5`, or `kwallet6`) in the key metadata. Electron's `basic_text`
+  backend is deliberately not treated as a keychain because it does not provide
+  OS-protected storage.
+- If no usable keychain is available, creation falls back to the existing
+  file-backed PEM protected by `0600` permissions and emits a warning. This is
+  a compatibility fallback, not equivalent protection to a desktop keychain or
+  macOS Secure Enclave.
+- Existing file-backed PEM records migrate to `safeStorage` on first read when
+  a usable backend is available. Failed migrations leave the original file
+  intact.
 - Preserves `remote_control = true` / `features.remote_control = true` in the
   local Codex config instead of letting upstream strip it before app-server
   startup.
@@ -232,13 +246,24 @@ a non-empty `windows` list.
 
 Known risks:
 
-- The Linux key provider is file-backed and protected by ordinary user file
-  permissions. It is not equivalent to OS- or hardware-backed non-extractable
-  key storage.
-- Linux host enrollment or outbound authorization can still fail server-side.
-  The official Remote documentation does not list Linux as a supported host
-  platform.
+- This is not equivalent to macOS Secure Enclave-backed storage. Private key
+  material is protected by the desktop keychain when available; the
+  `file_0600` fallback is protected only by ordinary user file permissions.
+- OpenAI may still reject Linux host enrollment or outbound authorization
+  server-side. This feature only removes local macOS-only blockers in the
+  repackaged app.
 - Treat this as experimental account-level remote-control plumbing.
+
+Keychain diagnostics:
+
+- Inspect the `storageBackend` and `detectedBackend` fields in
+  `remote-control-device-keys-v1.json` without sharing the private values.
+- `storageBackend` set to `gnome_libsecret` or `kwallet*` means the private key
+  is stored as Electron `safeStorage` ciphertext.
+- `storageBackend` set to `file_0600` means the session had no usable keychain,
+  selected `basic_text`, or was running without Electron safe storage. The
+  launcher log contains a warning with the detected backend but never logs key
+  material, ciphertext, signatures, or tokens.
 
 Run the feature tests with:
 
