@@ -92,6 +92,9 @@ function controllerFromPatchedSource(patched, overrides = {}) {
       if (moduleName === "node:child_process") {
         return overrides.childProcess ?? { execFile() {} };
       }
+      if (moduleName === "node:fs") return fs;
+      if (moduleName === "node:os") return os;
+      if (moduleName === "node:path") return path;
       if (moduleName === "electron") {
         return {
           app: { getName: () => "Codex" },
@@ -1788,6 +1791,7 @@ test("settings validation falls back to safe defaults", () => {
       alwaysOnTop: true,
       gravity: "bottom-right",
       hyprland: true,
+      kwin: true,
       lockPosition: true,
       margin: 512,
       mode: "interactive",
@@ -1795,4 +1799,88 @@ test("settings validation falls back to safe defaults", () => {
       skipTaskbar: true,
     },
   );
+});
+
+test("KWin Plasma bridge remains available with its runtime override and drag lifecycle", () => {
+  const patched = applyPetOverlayPatch(currentAvatarOverlayBundleFixture());
+
+  assert.equal(mergedPetOverlaySettings({}).kwin, true);
+  assert.match(patched, /CODEX_PET_OVERLAY_KWIN/);
+  assert.match(patched, /codexPetOverlayKWinQdbus\(/);
+  assert.match(patched, /codexPetOverlayKWinDragScript\(/);
+  assert.match(patched, /codexPetOverlayBeginKWinDrag\(/);
+  assert.match(patched, /codexPetOverlayEndKWinDrag\(/);
+});
+
+test("KWin hints target only the matching Plasma pet and apply its Wayland bounds", () => {
+  const calls = [];
+  let script = null;
+  const { controller } = controllerFromPatchedSource(
+    applyPetOverlayPatch(currentAvatarOverlayBundleFixture(), {
+      feature: { manifest: { petOverlay: { kwin: true, lockPosition: true } }, settings: {} },
+    }),
+    {
+      process: { env: { XDG_CURRENT_DESKTOP: "KDE" } },
+      childProcess: {
+        execFile(command, args, options, callback) {
+          calls.push([command, args]);
+          assert.equal(command, "qdbus6");
+          assert.equal(options.timeout, 1500);
+          if (args.includes("org.kde.kwin.Scripting.loadScript")) script = fs.readFileSync(args[3], "utf8");
+          callback(null, "ok");
+        },
+      },
+    },
+  );
+  const window = { isDestroyed: () => false };
+  controller.window = window;
+  controller.codexPetOverlayDesiredWindowBounds = { x: 610, y: 330, width: 356, height: 320 };
+
+  controller.codexPetOverlayApplyKWinHints(window);
+
+  assert.deepEqual(calls.map(([, args]) => args[2]), [
+    "org.kde.kwin.Scripting.loadScript",
+    "org.kde.kwin.Scripting.start",
+    "org.kde.kwin.Scripting.unloadScript",
+  ]);
+  const pet = { caption: "Codex Pet Overlay", frameGeometry: { x: 0, y: 0, width: 356, height: 320 }, pid: 4242 };
+  const foreign = { caption: "ChatGPT", frameGeometry: {}, pid: 4242 };
+  vm.runInNewContext(script, { workspace: { raiseWindow() {}, windowList: () => [foreign, pet] } });
+  assert.equal(pet.keepAbove, true);
+  assert.equal(pet.noBorder, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(pet.frameGeometry)), { x: 610, y: 330, width: 356, height: 320 });
+  assert.equal(foreign.keepAbove, undefined);
+});
+
+test("KWin drag uses qdbus, cleans up its temporary script, and honors its runtime override", () => {
+  const calls = [];
+  const { controller } = controllerFromPatchedSource(applyPetOverlayPatch(currentAvatarOverlayBundleFixture()), {
+    process: { env: { XDG_CURRENT_DESKTOP: "KDE" } },
+    childProcess: {
+      execFileSync(command, args, options) {
+        calls.push([command, args, options]);
+      },
+    },
+  });
+  const window = {
+    getContentBounds: () => ({ x: 145, y: 210, width: 356, height: 320 }),
+    isDestroyed: () => false,
+  };
+  controller.window = window;
+
+  controller.codexPetOverlayBeginKWinDrag(window);
+  const scriptPath = controller.codexPetOverlayKWinDragState.scriptPath;
+  assert.deepEqual(calls.slice(0, 2).map(([, args]) => args[2]), [
+    "org.kde.kwin.Scripting.loadScript",
+    "org.kde.kwin.Scripting.start",
+  ]);
+  assert.equal(fs.existsSync(scriptPath), true);
+  assert.equal(controller.codexPetOverlayEndKWinDrag(window, () => {}), true);
+  assert.equal(calls[2][1][2], "org.kde.kwin.Scripting.unloadScript");
+  assert.equal(fs.existsSync(scriptPath), false);
+
+  const overridden = controllerFromPatchedSource(applyPetOverlayPatch(currentAvatarOverlayBundleFixture()), {
+    process: { env: { XDG_CURRENT_DESKTOP: "KDE", CODEX_PET_OVERLAY_KWIN: "0" } },
+  }).controller;
+  assert.equal(overridden.codexPetOverlayShouldUseKWin(), false);
 });
