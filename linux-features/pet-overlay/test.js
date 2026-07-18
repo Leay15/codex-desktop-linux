@@ -51,7 +51,7 @@ function currentAvatarOverlayBundleFixture() {
     "var settingsHandlers={\"set-setting\":async({key:e,value:t})=>(this.setSettingValue(e,t),{success:!0})};",
     "var rV=`/avatar-overlay`,zB={width:356,height:320},oV={width:112,height:121},k2={width:0,height:0},O2={width:276,height:131};",
     "var h2=class{constructor(e,t,n,r){this.cursorSource=e;this.pointerAnchorX=t;this.pointerAnchorY=n;this.displayBounds=r}};",
-    "var fV=class{window=null;rendererReady=!1;layout=null;mascotSize=oV;traySize=null;pointerInteractive=!1;mousePassthroughEnabled=!1;windowStagedForNativePresentation=!1;layoutMode=`native`;compositionHost={setOverlayWindow(){},isNativeMaterialAttached(){return!1},getCursorPosition(){return null},updateMascotRect(){}};nativePositionController={clear(){}};",
+    "var fV=class{window=null;rendererReady=!1;layout=null;mascotSize=oV;traySize=null;pointerInteractive=!1;mousePassthroughEnabled=!1;windowStagedForNativePresentation=!1;layoutMode=`native`;compositionHost={setOverlayWindow(){},isNativeMaterialAttached(){return!1},getCursorPosition(){return null},performWindowDrag(){return!1},updateMascotRect(){}};nativePositionController={clear(){}};",
     "constructor(e,t){this.windowManager=e,this.globalState=t}",
     "isOpen(){let e=this.window;return e!=null&&!e.isDestroyed()&&e.isVisible()&&!this.windowStagedForNativePresentation}",
     "startDrag(e,t,n=!1){let r=this.window;if(r==null||r.isDestroyed()||r.webContents.id!==e)return;this.cancelMomentum();let i=this.getLayout(r),o=this.compositionHost.getCursorPosition(),s=t.pointerScreenX!=null?{x:t.pointerScreenX,y:t.pointerScreenY}:a.screen.getCursorScreenPoint();this.dragState=new h2(o==null?`renderer`:`native`,t.pointerWindowX-i.mascot.left,t.pointerWindowY-i.mascot.top,a.screen.getDisplayNearestPoint(s).bounds,n),this.windowServerDragActive=this.layoutMode===`native`&&!n&&this.compositionHost.performWindowDrag(),this.windowServerDragActive||(this.windowServerDragWindowX=null)}",
@@ -920,8 +920,8 @@ test("runtime lock override blocks drag start", () => {
   controller.startDrag(1, {
     pointerScreenX: 100,
     pointerScreenY: 100,
-    pointerWindowX: 20,
-    pointerWindowY: 20,
+    pointerWindowX: 80,
+    pointerWindowY: 80,
   });
 
   assert.deepEqual(JSON.parse(JSON.stringify(controller.dragState)), { preserved: true });
@@ -1044,6 +1044,58 @@ function runNiriHintScenario({
   controller.codexPetOverlayApplyNiriHints(window);
 
   return calls;
+}
+
+function createAsyncNiriDragScenario() {
+  const calls = [];
+  const pending = [];
+  const timers = [];
+  const patched = applyPetOverlayPatch(currentAvatarOverlayBundleFixture());
+  const { controller } = controllerFromPatchedSource(patched, {
+    process: { env: { XDG_CURRENT_DESKTOP: "niri" } },
+    childProcess: {
+      execFile(command, args, options, callback) {
+        assert.equal(command, "niri");
+        assert.equal(options.timeout, 1200);
+        calls.push(args);
+        pending.push({ args, callback });
+      },
+    },
+    setTimeout(callback, delay) {
+      const timer = { callback, delay, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeout(timer) {
+      timer.cleared = true;
+    },
+  });
+  const window = {
+    getBounds: () => ({ x: 100, y: 100, width: 356, height: 320 }),
+    isDestroyed: () => false,
+    webContents: { id: 1 },
+  };
+  controller.window = window;
+  controller.codexPetOverlayDesiredDisplayBounds = { x: 0, y: 0, width: 1920, height: 1080 };
+  controller.codexPetOverlayDesiredWindowBounds = { x: 100, y: 100, width: 356, height: 320 };
+  return { calls, controller, pending, timers, window };
+}
+
+function completePendingNiriCall(scenario, { error = null, stdout = "ok" } = {}) {
+  const call = scenario.pending.shift();
+  assert.ok(call, "expected a pending niri call");
+  call.callback(error, stdout);
+  return call.args;
+}
+
+function niriPetWindow(id, isFloating = true) {
+  return JSON.stringify([{
+    id,
+    is_floating: isFloating,
+    layout: { window_size: [356, 320] },
+    pid: 4242,
+    title: "Codex Pet Overlay",
+  }]);
 }
 
 test("targets only the unambiguous Hyprland pet window address", () => {
@@ -1776,6 +1828,243 @@ test("Niri scheduling is coalesced when desired bounds change repeatedly", () =>
 
   assert.deepEqual(timers.map((timer) => timer.delay), [0, 80, 300, 1000, 0, 80, 300, 1000]);
   assert.deepEqual(cleared, timers.slice(0, 4));
+});
+
+test("Niri drag keeps one move in flight and emits only the latest queued target", () => {
+  const scenario = createAsyncNiriDragScenario();
+  const { controller, pending, window } = scenario;
+
+  controller.codexPetOverlayBeginNiriDrag(window);
+  assert.equal(pending.length, 1);
+  completePendingNiriCall(scenario, { stdout: niriPetWindow(9) });
+  assert.equal(pending.length, 1);
+  assert.equal(JSON.stringify(pending[0].args.slice(-4)), JSON.stringify(["-x", "100", "-y", "100"]));
+
+  controller.codexPetOverlayDesiredWindowBounds = { x: 600, y: 100, width: 356, height: 320 };
+  controller.codexPetOverlayQueueNiriDrag(window);
+  controller.codexPetOverlayDesiredWindowBounds = { x: 120, y: 100, width: 356, height: 320 };
+  controller.codexPetOverlayQueueNiriDrag(window);
+
+  assert.equal(pending.length, 1, "a second compositor move must not overlap the first");
+  completePendingNiriCall(scenario);
+  assert.equal(pending.length, 1);
+  assert.equal(JSON.stringify(pending[0].args.slice(-4)), JSON.stringify(["-x", "120", "-y", "100"]));
+  assert.equal(scenario.calls.some((args) => args.includes("600")), false);
+});
+
+test("Niri drag waits for an already-running bootstrap compositor action", () => {
+  const scenario = createAsyncNiriDragScenario();
+  const { controller, pending, window } = scenario;
+
+  controller.codexPetOverlayNiri(["action", "move-floating-window", "--id", "9", "-x", "40", "-y", "40"]);
+  assert.equal(pending.length, 1);
+  controller.codexPetOverlayBeginNiriDrag(window);
+  assert.equal(pending.length, 1, "drag discovery must wait for the bootstrap action");
+
+  completePendingNiriCall(scenario);
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].args.includes("windows"), true);
+});
+
+test("completed Niri processes do not schedule another hint batch without a pending request", () => {
+  const scenario = createAsyncNiriDragScenario();
+  const { controller, pending, timers } = scenario;
+
+  controller.codexPetOverlayNiri(["--json", "windows"]);
+  assert.equal(pending.length, 1);
+  completePendingNiriCall(scenario, { stdout: "[]" });
+
+  assert.equal(pending.length, 0);
+  assert.deepEqual(timers, []);
+});
+
+test("Niri drag floats a tiled pet before its first move", () => {
+  const scenario = createAsyncNiriDragScenario();
+  const { controller, pending, window } = scenario;
+
+  controller.codexPetOverlayBeginNiriDrag(window);
+  completePendingNiriCall(scenario, { stdout: niriPetWindow(9, false) });
+
+  assert.equal(pending.length, 1);
+  assert.equal(
+    JSON.stringify(pending[0].args),
+    JSON.stringify(["msg", "action", "move-window-to-floating", "--id", "9"]),
+  );
+  assert.equal(scenario.calls.some((args) => args.includes("move-floating-window")), false);
+
+  completePendingNiriCall(scenario);
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].args.includes("move-floating-window"), true);
+});
+
+test("Niri endDrag drains the final move before persisting and docking", () => {
+  const scenario = createAsyncNiriDragScenario();
+  const { controller, pending, window } = scenario;
+  const completed = [];
+  controller.getLayout = () => ({ mascot: { left: 0, top: 0 } });
+  controller.compositionHost.performWindowDrag = () => true;
+  controller.persistWindowBounds = (target, display) => completed.push(["persist", target, display]);
+  controller.dockTarget = { anchor: "dock-anchor", onDock: "dock-handler" };
+  controller.dockPresentation = (anchor, onDock) => completed.push(["dock", anchor, onDock]);
+
+  controller.startDrag(1, {
+    pointerScreenX: 100,
+    pointerScreenY: 100,
+    pointerWindowX: 20,
+    pointerWindowY: 20,
+  });
+  controller.codexPetOverlayDesiredWindowBounds = { x: 120, y: 100, width: 356, height: 320 };
+  controller.codexPetOverlayQueueNiriDrag(window);
+  controller.endDrag(1, {});
+
+  assert.deepEqual(completed, []);
+  completePendingNiriCall(scenario, { stdout: niriPetWindow(9) });
+  assert.equal(pending.length, 1);
+  assert.equal(JSON.stringify(pending[0].args.slice(-4)), JSON.stringify(["-x", "120", "-y", "100"]));
+  assert.deepEqual(completed, []);
+  completePendingNiriCall(scenario);
+
+  assert.equal(completed.length, 2);
+  assert.equal(completed[0][0], "persist");
+  assert.equal(completed[0][1], window);
+  assert.equal(completed[0][2]?.id, 1);
+  assert.deepEqual(completed[1], ["dock", "dock-anchor", "dock-handler"]);
+  assert.equal(controller.codexPetOverlayNiriDragState, null);
+});
+
+test("stale Niri callbacks clear drag state and reschedule hints for a replacement window", () => {
+  const scenario = createAsyncNiriDragScenario();
+  const { controller, pending, timers, window: oldWindow } = scenario;
+  controller.codexPetOverlayBeginNiriDrag(oldWindow);
+  assert.equal(pending.length, 1);
+
+  const newWindow = {
+    getBounds: () => ({ x: 300, y: 200, width: 356, height: 320 }),
+    isDestroyed: () => false,
+    webContents: { id: 2 },
+  };
+  controller.window = newWindow;
+  completePendingNiriCall(scenario, { stdout: niriPetWindow(41) });
+
+  assert.equal(controller.codexPetOverlayNiriDragState, null);
+  assert.deepEqual(timers.map((timer) => timer.delay), [0, 80, 300, 1000]);
+});
+
+test("Niri hint scheduling clears an idle drag state left by a replaced window", () => {
+  const scenario = createAsyncNiriDragScenario();
+  const { controller, pending, timers, window: oldWindow } = scenario;
+  controller.codexPetOverlayBeginNiriDrag(oldWindow);
+  completePendingNiriCall(scenario, { stdout: niriPetWindow(9) });
+  completePendingNiriCall(scenario);
+  assert.equal(pending.length, 0);
+  assert.notEqual(controller.codexPetOverlayNiriDragState, null);
+
+  const newWindow = {
+    getBounds: () => ({ x: 300, y: 200, width: 356, height: 320 }),
+    isDestroyed: () => false,
+    webContents: { id: 2 },
+  };
+  controller.window = newWindow;
+  controller.dragState = null;
+  controller.codexPetOverlayScheduleNiriHints(newWindow);
+
+  assert.equal(controller.codexPetOverlayNiriDragState, null);
+  assert.deepEqual(timers.map((timer) => timer.delay), [0, 80, 300, 1000]);
+});
+
+test("stale Niri discovery callbacks cannot continue a replacement window drag", () => {
+  const scenario = createAsyncNiriDragScenario();
+  const { controller, pending, window: oldWindow } = scenario;
+  controller.codexPetOverlayBeginNiriDrag(oldWindow);
+
+  const newWindow = {
+    getBounds: () => ({ x: 300, y: 200, width: 356, height: 320 }),
+    isDestroyed: () => false,
+    webContents: { id: 2 },
+  };
+  controller.window = newWindow;
+  controller.codexPetOverlayDesiredWindowBounds = { x: 300, y: 200, width: 356, height: 320 };
+  controller.codexPetOverlayBeginNiriDrag(newWindow);
+  assert.equal(pending.length, 1, "replacement discovery must wait for the previous call");
+
+  completePendingNiriCall(scenario, { stdout: niriPetWindow(41) });
+  assert.equal(pending.length, 1, "the replacement discovery starts only after the stale call completes");
+  completePendingNiriCall(scenario, { stdout: niriPetWindow(42) });
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].args.includes("42"), true);
+  assert.equal(scenario.calls.some((args) => args.includes("41") && args.includes("action")), false);
+});
+
+test("Niri drag discovery recovery is bounded and ENOENT aborts immediately", () => {
+  const scenario = createAsyncNiriDragScenario();
+  const { controller, pending, timers, window } = scenario;
+  controller.codexPetOverlayBeginNiriDrag(window);
+
+  completePendingNiriCall(scenario, { error: new Error("discovery failed"), stdout: "" });
+  assert.deepEqual(timers.map((timer) => timer.delay), [80]);
+  timers.shift().callback();
+  completePendingNiriCall(scenario, { error: new Error("discovery failed"), stdout: "" });
+  assert.deepEqual(timers.map((timer) => timer.delay), [300]);
+  timers.shift().callback();
+  completePendingNiriCall(scenario, { stdout: "[]" });
+
+  assert.equal(scenario.calls.filter((args) => args.includes("windows")).length, 3);
+  assert.equal(controller.codexPetOverlayNiriDragState, null);
+  assert.equal(pending.length, 0);
+
+  const missingScenario = createAsyncNiriDragScenario();
+  missingScenario.controller.codexPetOverlayBeginNiriDrag(missingScenario.window);
+  const missingError = new Error("missing niri");
+  missingError.code = "ENOENT";
+  completePendingNiriCall(missingScenario, { error: missingError, stdout: "" });
+  assert.equal(missingScenario.controller.codexPetOverlayNiriDragState, null);
+  assert.deepEqual(missingScenario.timers, []);
+});
+
+test("Niri drag action failure invalidates the cached id and rediscovers once serialized", () => {
+  const scenario = createAsyncNiriDragScenario();
+  const { controller, pending, timers, window } = scenario;
+  controller.codexPetOverlayBeginNiriDrag(window);
+  completePendingNiriCall(scenario, { stdout: niriPetWindow(9) });
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].args.includes("move-floating-window"), true);
+
+  completePendingNiriCall(scenario, { error: new Error("move failed"), stdout: "" });
+  assert.equal(pending.length, 0);
+  assert.deepEqual(timers.map((timer) => timer.delay), [80]);
+  timers.shift().callback();
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].args.includes("windows"), true);
+
+  completePendingNiriCall(scenario, { stdout: niriPetWindow(10) });
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].args.includes("10"), true);
+  assert.equal(scenario.calls.filter((args) => args.includes("move-floating-window")).length, 2);
+});
+
+test("stale Niri action completion cannot continue a replacement drag", () => {
+  const scenario = createAsyncNiriDragScenario();
+  const { controller, pending, window: oldWindow } = scenario;
+  controller.codexPetOverlayBeginNiriDrag(oldWindow);
+  completePendingNiriCall(scenario, { stdout: niriPetWindow(41) });
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].args.includes("41"), true);
+
+  const newWindow = {
+    getBounds: () => ({ x: 300, y: 200, width: 356, height: 320 }),
+    isDestroyed: () => false,
+    webContents: { id: 2 },
+  };
+  controller.window = newWindow;
+  controller.codexPetOverlayDesiredWindowBounds = { x: 300, y: 200, width: 356, height: 320 };
+  controller.codexPetOverlayBeginNiriDrag(newWindow);
+  assert.equal(pending.length, 1, "replacement drag must not overlap the previous compositor action");
+
+  completePendingNiriCall(scenario);
+  assert.equal(pending.length, 1, "replacement discovery starts after the old action completes");
+  completePendingNiriCall(scenario, { stdout: niriPetWindow(42) });
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].args.includes("42"), true);
 });
 
 test("settings validation falls back to safe defaults", () => {
