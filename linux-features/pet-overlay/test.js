@@ -2143,11 +2143,15 @@ test("KWin hints target only the matching Plasma pet and apply its Wayland bound
 
 test("KWin drag uses qdbus, cleans up its temporary script, and honors its runtime override", () => {
   const calls = [];
+  let script = null;
   const { controller } = controllerFromPatchedSource(applyPetOverlayPatch(currentAvatarOverlayBundleFixture()), {
     process: { env: { XDG_CURRENT_DESKTOP: "KDE" } },
     childProcess: {
       execFileSync(command, args, options) {
         calls.push([command, args, options]);
+        if (args.includes("org.kde.kwin.Scripting.loadScript")) {
+          script = fs.readFileSync(args[3], "utf8");
+        }
       },
     },
   });
@@ -2155,6 +2159,7 @@ test("KWin drag uses qdbus, cleans up its temporary script, and honors its runti
     getContentBounds: () => ({ x: 145, y: 210, width: 356, height: 320 }),
     isDestroyed: () => false,
   };
+  let persisted = false;
   controller.window = window;
 
   controller.codexPetOverlayBeginKWinDrag(window);
@@ -2163,13 +2168,73 @@ test("KWin drag uses qdbus, cleans up its temporary script, and honors its runti
     "org.kde.kwin.Scripting.loadScript",
     "org.kde.kwin.Scripting.start",
   ]);
+  assert.equal(calls[0][0], "qdbus6");
+  assert.equal(calls[0][2].timeout, 750);
+  assert.equal(controller.windowServerDragActive, true);
+  assert.equal(controller.windowServerDragWindowX, 145);
+  assert.ok(script);
+
+  const cursorSignal = { callback: null, connect(callback) { this.callback = callback; }, disconnect() {} };
+  const removedSignal = { connect() {} };
+  const pet = {
+    caption: "Codex Pet Overlay",
+    frameGeometry: { x: 100, y: 200, width: 356, height: 320 },
+    pid: 4242,
+  };
+  const workspace = {
+    cursorPos: { x: 130, y: 250 },
+    cursorPosChanged: cursorSignal,
+    raiseWindow() {},
+    windowList: () => [pet],
+    windowRemoved: removedSignal,
+  };
+  vm.runInNewContext(script, { workspace });
+  assert.equal(typeof cursorSignal.callback, "function");
+  workspace.cursorPos = { x: 300, y: 410 };
+  cursorSignal.callback();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(pet.frameGeometry)),
+    { x: 270, y: 360, width: 356, height: 320 },
+  );
+
+  controller.codexPetOverlayQueueKWinDrag(window);
+  assert.equal(calls.length, 2, "pointer updates must not spawn compositor processes");
   assert.equal(fs.existsSync(scriptPath), true);
-  assert.equal(controller.codexPetOverlayEndKWinDrag(window, () => {}), true);
+  assert.equal(controller.codexPetOverlayEndKWinDrag(window, () => { persisted = true; }), true);
   assert.equal(calls[2][1][2], "org.kde.kwin.Scripting.unloadScript");
   assert.equal(fs.existsSync(scriptPath), false);
+  assert.equal(persisted, true);
+  assert.equal(controller.codexPetOverlayKWinDragState, null);
 
   const overridden = controllerFromPatchedSource(applyPetOverlayPatch(currentAvatarOverlayBundleFixture()), {
     process: { env: { XDG_CURRENT_DESKTOP: "KDE", CODEX_PET_OVERLAY_KWIN: "0" } },
   }).controller;
   assert.equal(overridden.codexPetOverlayShouldUseKWin(), false);
+});
+
+test("KWin drag falls back without repeatedly probing missing qdbus commands", () => {
+  const patched = applyPetOverlayPatch(currentAvatarOverlayBundleFixture());
+  let calls = 0;
+  const { controller } = controllerFromPatchedSource(patched, {
+    process: { env: { XDG_CURRENT_DESKTOP: "KDE" } },
+    childProcess: {
+      execFileSync() {
+        calls += 1;
+        const error = new Error("qdbus missing");
+        error.code = "ENOENT";
+        throw error;
+      },
+    },
+  });
+  const window = { isDestroyed: () => false };
+  controller.window = window;
+
+  controller.codexPetOverlayBeginKWinDrag(window);
+
+  assert.equal(calls, 2);
+  assert.equal(controller.codexPetOverlayKWinDragState, undefined);
+  assert.equal(controller.windowServerDragActive, undefined);
+
+  controller.codexPetOverlayBeginKWinDrag(window);
+  assert.equal(calls, 2);
 });
