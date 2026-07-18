@@ -920,8 +920,8 @@ test("runtime lock override blocks drag start", () => {
   controller.startDrag(1, {
     pointerScreenX: 100,
     pointerScreenY: 100,
-    pointerWindowX: 80,
-    pointerWindowY: 80,
+    pointerWindowX: 20,
+    pointerWindowY: 20,
   });
 
   assert.deepEqual(JSON.parse(JSON.stringify(controller.dragState)), { preserved: true });
